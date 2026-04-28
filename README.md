@@ -1,6 +1,20 @@
 # MASPO
 This repository anonymously releases the codes and data for the paper MASPO: Joint Prompt Co-evolution for LLM-based Multi-Agent Systems
 
+
+## **🧠 About MASPO**
+MASPO is a novel joint prompt optimization framework designed for LLM-based Multi-Agent Systems (MAS), motivated by the observation that the quality of role-specific prompts critically governs agent behaviors and interaction dynamics, yet optimizing them jointly is challenging due to the misalignment between local agent objectives and holistic system goals. MASPO automatically and iteratively refines prompts across the entire system without relying on ground-truth labels, bridging the gap between local interactions and global outcomes. It consists of three key components:
+
+- **Multi-Granularity Joint Evaluation**: Assess each candidate prompt along three complementary dimensions—*Local Validity* (role-specific adherence), *Lookahead Potential* (utility for immediate successor agents), and *Global Alignment* (impact on the final system response)—to resolve the credit assignment dilemma in MAS.
+- **Misalignment-Driven Generative Search**: Explicitly mine *Misalignment Cases*, where an agent fulfills its local role but induces downstream or system-wide failure, and inject them as hard negatives to guide the optimizer in repairing specific interaction breakdowns.
+- **Evolutionary Beam Search with Adaptive Dynamics**: Navigate the high-dimensional prompt space via a trace-guided beam search, orchestrated by a coordinate ascent-style scheduling protocol and a *Beam Refresh* mechanism that re-anchors stale candidate scores to mitigate the non-stationarity caused by co-evolving peer agents.
+
+<p align="center">
+  <img src="./main.png" width="750" alt="MASPO Framework">
+</p>
+<p align="center">The Framework of MASPO</p>
+
+
 ## **📖 Parameter Reference for `run_maspo.py`**
 This script serves as the main entry point for running Multi-Agent System (MAS) evaluation and prompt optimization across various datasets and task types.
 ### **Basic Arguments**
@@ -54,3 +68,10 @@ python run_tbdspo.py --dataset mbpp --graph reflect --optimize --fixed-rounds  -
 python run_tbdspo.py --dataset humaneval --graph reflect --prompt-file prompt/optimized_humaneval.json
 # MASPO
 python run_tbdspo.py --dataset aqua --graph reflect --optimize --fixed-rounds --beam-refresh --lookahead-score --misleading-sampling
+```
+
+## **📜 Citation**
+If you find this work useful, please cite:
+```bash
+
+```
