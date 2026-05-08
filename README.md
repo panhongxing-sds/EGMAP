@@ -1,6 +1,9 @@
 # MASPO
 This repository anonymously releases the codes and data for the paper MASPO: Joint Prompt Co-evolution for LLM-based Multi-Agent Systems
 
+## **📣 News**
+- **[08/05/2026]** Our paper has been submitted to arXiv: [https://arxiv.org/abs/2605.06623](https://arxiv.org/abs/2605.06623)!
+- **[01/05/2026]** 🎉🎉Our paper is accepted by [ICML 2026]!🎉🎉
 
 ## **🧠 About MASPO**
 MASPO is a novel joint prompt optimization framework designed for LLM-based Multi-Agent Systems (MAS), motivated by the observation that the quality of role-specific prompts critically governs agent behaviors and interaction dynamics, yet optimizing them jointly is challenging due to the misalignment between local agent objectives and holistic system goals. MASPO automatically and iteratively refines prompts across the entire system without relying on ground-truth labels, bridging the gap between local interactions and global outcomes. It consists of three key components:
@@ -73,5 +76,13 @@ python run_tbdspo.py --dataset aqua --graph reflect --optimize --fixed-rounds --
 ## **📜 Citation**
 If you find this work useful, please cite:
 ```bash
-
+@misc{wang2026maspojointpromptoptimization,
+      title={MASPO: Joint Prompt Optimization for LLM-based Multi-Agent Systems}, 
+      author={Zhexuan Wang and Xuebo Liu and Li Wang and Zifei Shan and Yutong Wang and Zhenxi Song and Min Zhang},
+      year={2026},
+      eprint={2605.06623},
+      archivePrefix={arXiv},
+      primaryClass={cs.AI},
+      url={https://arxiv.org/abs/2605.06623}, 
+}
 ```
