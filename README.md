@@ -1,5 +1,5 @@
-# MASPO
-This repository anonymously releases the codes and data for the paper MASPO: Joint Prompt Co-evolution for LLM-based Multi-Agent Systems
+# MASPO (ICML 2026)
+This repository anonymously releases the codes and data for the paper MASPO: Joint Prompt Optimization for LLM-based Multi-Agent Systems
 
 ## **📣 News**
 - **[08/05/2026]** Our paper has been submitted to arXiv: [https://arxiv.org/abs/2605.06623](https://arxiv.org/abs/2605.06623)!
