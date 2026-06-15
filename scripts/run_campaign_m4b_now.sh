@@ -40,11 +40,11 @@ export EGMAP_MAX_CONCURRENT="${EGMAP_MAX_CONCURRENT:-8}"
 export SKIP_PREFLIGHT=1
 PY=".venv/bin/python"
 
-echo ">>> MASPO remaining text+VQA (skip math500/aqua if done)"
+echo "[phase] MASPO remaining text+VQA (skip math500/aqua if done)"
 export DATASETS="gpqa agieval humaneval vqarad slake chartqa"
 bash scripts/run_maspo_official_phase1.sh || true
 
-echo ">>> EGMAP full m4b"
+echo "[phase] EGMAP full m4b"
 export DATASETS="math500 aqua gpqa agieval humaneval vqarad slake chartqa"
 bash scripts/run_egmap_official_phase2a.sh || true
 

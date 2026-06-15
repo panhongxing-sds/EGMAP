@@ -41,11 +41,11 @@ export EGMAP_MAX_CONCURRENT="${EGMAP_MAX_CONCURRENT:-6}"
 export SKIP_PREFLIGHT="${SKIP_PREFLIGHT:-1}"
 PY=".venv/bin/python"
 
-echo ">>> MASPO full m9b (8 datasets)"
+echo "[phase] MASPO full m9b (8 datasets)"
 export DATASETS="math500 aqua gpqa agieval humaneval vqarad slake chartqa"
 bash scripts/run_maspo_official_phase1.sh || true
 
-echo ">>> EGMAP full m9b"
+echo "[phase] EGMAP full m9b"
 export MAX_CONCURRENT="${EGMAP_MAX_CONCURRENT}"
 bash scripts/run_egmap_official_phase2a.sh || true
 
