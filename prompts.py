@@ -1,11 +1,20 @@
 from config import AgentType, TaskType
 
+# Unified math answer format: keep the content inside <answer></answer> in a
+# single canonical exact form so deterministic grading needs no guesswork.
+MATH_ANSWER_FORMAT = (
+    "Inside <answer></answer> put ONLY the final answer in simplest exact form: "
+    "use a/b for fractions (e.g. 1/2, not 0.5 and not \\frac{1}{2}); keep integers as integers; "
+    "no \\boxed, no LaTeX commands, no units, no surrounding text or $ signs."
+)
+
 ROLE_DESCRIPTIONS = {
     AgentType.PREDICTOR: {
         TaskType.MATH: "Primary solver that provides step-by-step mathematical reasoning and final answer.",
         TaskType.MATH_CHOICE: "Primary solver that provides step-by-step mathematical reasoning and final answer.",
         TaskType.REASONING_CHOICE: "Primary solver that provides step-by-step reasoning and final answer.",
         TaskType.CODE: "Primary solver that provides step-by-step reasoning and final answer.",
+        TaskType.VQA_OPEN: "Primary solver that looks at the image and answers the visual question with step-by-step reasoning.",
     },
     AgentType.SUMMARIZER: "Extractor of relevant information from context to assist problem solving.",
     AgentType.REFLECTOR: "Critical reviewer that identifies errors in previous solutions and provides corrected reasoning.",
@@ -35,7 +44,8 @@ def get_role_description(agent_type: AgentType, task_type: TaskType = None) -> s
 AGENT_TEMPLATES = {
     TaskType.MATH: {
         AgentType.PREDICTOR: (
-            "Let's think step by step. Show your final answer bracketed between <answer> and </answer> tags.\n"
+            "Let's think step by step. Show your final answer bracketed between <answer> and </answer> tags. "
+            + MATH_ANSWER_FORMAT + "\n"
             "{context}\n"
             "Question: {question}\nReasoning:"
         ),
@@ -46,18 +56,18 @@ AGENT_TEMPLATES = {
         ),
         AgentType.REFLECTOR: (
             "Please review the solution above and criticize where it might be wrong. "
-            "Show your final answer bracketed between <answer> and </answer>.\n"
+            "Show your final answer bracketed between <answer> and </answer>. " + MATH_ANSWER_FORMAT + "\n"
             "Question: {question}\nSolution: {context}\nFeedback: indicating the reflection of the solution given the question.\nCorrect answer:"
         ),
         AgentType.DEBATOR: (
             "These are the solutions to the question from other agents. Examine the solutions from other agents in your rationale, finish by giving an updated answer. "
-            "Show your final answer bracketed between <answer> and </answer>.\n"
+            "Show your final answer bracketed between <answer> and </answer>. " + MATH_ANSWER_FORMAT + "\n"
             "Question: {question}\nSolutions: {context}\nAnswer:"
         ),
         AgentType.LLM_AGG: (
             "You are given several candidate solutions to the following math problem. "
             "Carefully compare their reasoning and answers, then produce a single final solution. "
-            "Show your final answer bracketed between <answer> and </answer> tags.\n"
+            "Show your final answer bracketed between <answer> and </answer> tags. " + MATH_ANSWER_FORMAT + "\n"
             "Question: {question}\n\n"
             "Candidate solutions:\n{context}\n"
             "Answer:"
@@ -126,6 +136,39 @@ AGENT_TEMPLATES = {
         ),
     },
     
+    TaskType.VQA_OPEN: {
+        AgentType.PREDICTOR: (
+            "Look at the image and answer the question. Let's think step by step. "
+            "Show your final answer bracketed between <answer> and </answer> tags.\n"
+            "{context}\n"
+            "Question: {question}\nReasoning:"
+        ),
+        AgentType.SUMMARIZER: (
+            "Based on the image and the visual question, retrieve relevant information from the provided context "
+            "that is ONLY helpful in answering the question. Do not repeat irrelevant context. Start with 'Summary: '.\n"
+            "Question: {question}\nContext: {context}\nSummary:"
+        ),
+        AgentType.REFLECTOR: (
+            "Look at the image. Please review the answer above and criticize where it might be wrong. "
+            "Show your final answer bracketed between <answer> and </answer>.\n"
+            "Question: {question}\nSolution: {context}\nFeedback: indicating the reflection of the answer given the image and question.\nCorrect answer:"
+        ),
+        AgentType.DEBATOR: (
+            "These are the answers to the visual question from other agents. Look at the image, examine the other "
+            "agents' answers in your rationale, finish by giving an updated answer. "
+            "Show your final answer bracketed between <answer> and </answer>.\n"
+            "Question: {question}\nSolutions: {context}\nAnswer:"
+        ),
+        AgentType.LLM_AGG: (
+            "You are given several candidate answers to the following visual question. Look at the image, "
+            "carefully compare their reasoning and answers, then produce a single final answer. "
+            "Show your final answer bracketed between <answer> and </answer> tags.\n"
+            "Question: {question}\n\n"
+            "Candidate answers:\n{context}\n"
+            "Answer:"
+        ),
+    },
+
     TaskType.CODE: {
         AgentType.PREDICTOR: (
             "You are an expert Python programmer. Write clean, efficient, and well-documented code.\n"
@@ -166,7 +209,10 @@ AGENT_TEMPLATES = {
 
 def get_agent_template(task_type: TaskType, agent_type: AgentType) -> str:
     """获取Agent模板"""
-    return AGENT_TEMPLATES.get(task_type, {}).get(agent_type)
+    templates = AGENT_TEMPLATES.get(task_type)
+    if templates is None and task_type == TaskType.VQA_CHOICE:
+        templates = AGENT_TEMPLATES.get(TaskType.REASONING_CHOICE)
+    return (templates or {}).get(agent_type)
 
 COMPRESS_PROMPTS = {
     TaskType.MATH: (
@@ -188,9 +234,44 @@ COMPRESS_PROMPTS = {
         "Summarize the key logic of this Python code in at most 50 words:\n\n"
         "{raw}\n\nSummary:"
     ),
+    TaskType.VQA_OPEN: (
+        "Below is an answer to a visual question. "
+        "Summarize the key reasoning and the final answer in at most 30 words.\n\n"
+        "{raw}\n\nSummary:"
+    ),
 }
 
 PROMPT_OPTIMIZE_TEMPLATE = {
+    TaskType.VQA_OPEN: """
+You are optimizing a prompt for a specific agent in a multi-agent visual question answering system. The agent answers an open-ended question about an image.
+CRITICAL: The agent's core role and responsibilities MUST be preserved in the optimized prompt.
+
+Agent Type: {agent_type}
+Current System Role: {role_description}
+
+Sample Execution Traces (Question + Context + Agent Output)
+```
+{samples}
+```
+Requirements:
+```
+{requirements}
+```
+Reference prompt:
+```
+{prompt}
+```
+Your Task:
+1. Analyze the "Agent Output" in the samples above against the Requirements.
+2. Identify specific visual-QA failure patterns (e.g., misreading the image, wrong region or imaging modality, missing <answer> tags, over-long reasoning that buries the final answer).
+3. Determine if the current prompt is too vague, causing these errors.
+4. Propose a new prompt that steers the agent to read the image carefully and output a concise final answer in <answer>...</answer>.
+Provide your analysis, optimization points, and the complete optimized prompt using the following XML format:
+<analyse>Analyse the drawbacks in the results and how to improve them.</analyse>
+<modification>One sentence summary of the key improvement</modification>
+<prompt>Provide the complete optimized prompt</prompt>
+""",
+
     TaskType.MATH: """
 You are optimizing a prompt for a specific agent in a multi-agent mathematical reasoning system.
 CRITICAL: The agent's core role and responsibilities MUST be preserved in the optimized prompt.
@@ -313,6 +394,35 @@ Provide your analysis, optimization points, and the complete optimized prompt us
 }
 
 ANSWER_EVALUATE_TEMPLATE = {
+    TaskType.VQA_OPEN: """
+You are evaluating two outputs (A and B) from an agent of type {agent_type} answering an open-ended question about an image.
+Based on the input, requirements and the agent's role, evaluate the two responses, A and B, and determine which one is better.
+
+The agent's specific role: {role_description}
+
+# Input to the Agent
+Question: {question}
+
+# Requirement
+{requirement}
+
+# A
+{Answer_A}
+
+# B
+{Answer_B}
+
+Guidelines:
+- If one contains a clearly correct final answer to the visual question and the other does not, choose the correct one — even if its explanation is shorter.
+- If both answers appear correct, prefer the one with clearer, visually-grounded reasoning.
+- Do NOT favor verbose or confident-sounding outputs if they are wrong.
+- Pay attention to the format of final answer (<answer>...</answer>).
+
+Provide your analysis and the choice you believe is better, using XML tags to encapsulate your response.
+<analyse>Some analysis</analyse>
+<choose>A/B</choose>
+""",
+
     TaskType.MATH: """
 You are evaluating two outputs (A and B) from an agent of type {agent_type}.
 Based on the input, requirements and the agent's role, evaluate the two responses, A and B, and determine which one is better.
@@ -656,6 +766,12 @@ OPTIMIZATION_REQUIREMENTS = {
         "The agent must produce a clear, step-by-step reasoning process followed by syntactically correct Python code that passes all possible test cases. "
         "The format of code must be like ```python\ndef function_name(input_arguments): \n#code here\nreturn output```without any exception detection, input validation, type annotations, or edge-case handling. "
     ),
+    TaskType.VQA_OPEN: (
+        "The agent looks at an image and answers a visual question. "
+        "Crucially, the **final answer must appear ONLY once**, enclosed strictly between <answer> and </answer> tags, "
+        "with **no additional text, explanation, or reasoning inside these tags**. "
+        "The content within `<answer>...</answer>` must be a concise answer grounded in the image (a short word or phrase, e.g. 'yes', 'left lung'), NOT an option letter."
+    ),
 }
 
 AGENT_DROPOUT_MATH_PROMPTS = {
@@ -896,3 +1012,10 @@ ROLE_DESCRIPTIONS.update({
     AgentType.CODE_AGENT: "You are a code agent.",
     AgentType.TASK_SUMMARIZER: "You are a task summarizer.",
 })
+
+# VQA_CHOICE (pmcvqa): visual handoff + letter judging. Reuse REASONING_CHOICE
+# meta-prompts (option-letter answer format) for optimizer/evaluator/requirements;
+# the v3 structured optimizer uses its own visual VQA_CHOICE template (see prompts_structured).
+for _vc in (OPTIMIZATION_REQUIREMENTS, PROMPT_OPTIMIZE_TEMPLATE, ANSWER_EVALUATE_TEMPLATE):
+    if TaskType.REASONING_CHOICE in _vc:
+        _vc.setdefault(TaskType.VQA_CHOICE, _vc[TaskType.REASONING_CHOICE])

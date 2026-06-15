@@ -1,0 +1,28 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Runtime artifacts (sync via rsync / manual copy between servers)
+logs/
+result/
+memory/
+prompt/
+stats/
+
+# Local / secrets
+.env
+*.pem
+key/
+Untitled
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db

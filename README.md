@@ -1,5 +1,64 @@
-# MASPO (ICML 2026)
-This repository anonymously releases the codes and data for the paper MASPO: Joint Prompt Optimization for LLM-based Multi-Agent Systems
+# EGMAP — Experience-Guided Multi-Agent Prompting
+
+基于官方 [MASPO](https://github.com/wangzx1219/MASPO)（ICML 2026）的 ExHandoff / EGMAP 实验代码。
+
+**正式实验怎么跑 → 请看 [RUN.md](RUN.md)**（双机分工：本机 4B `m4b`、另一台 9B `m9b`）。
+
+| 文档 | 内容 |
+|------|------|
+| [RUN.md](RUN.md) | **运行手册**（一键 campaign、分步命令、排错） |
+| [EXPERIMENT_PLAN.md](EXPERIMENT_PLAN.md) | 实验协议与分阶段计划 |
+| [METHOD.md](METHOD.md) | 官方 MASPO vs EGMAP 边界 |
+| [RESULT.md](RESULT.md) | 结果台账与审计状态 |
+
+## Experience-Guided Multi-Agent Prompting (ExHandoff)
+
+This fork starts from the official MASPO codebase and adds an independent
+experience-guided coordination layer:
+
+- **Error Memory Bank** retrieves reusable historical failure patterns without
+  leaking gold labels into evaluation prompts.
+- **Adaptive Handoff** injects sender/receiver contracts between agents so
+  downstream agents can preserve good answers and repair concrete errors.
+- **Disagreement Verification** adds topology-aware arbitration for parallel
+  agents and conservative verification for sequential reflection.
+- **Residual Selector** runs a MASPO-style base and a handoff challenger, then
+  uses a verifier-guided gate to keep the base unless the challenger provides
+  stronger evidence.
+- **Unified Runtime Config** is centralized in `scripts/env_unified.sh` and
+  `config.py`: local vLLM endpoints, proxy removal, dataset paths, seeds,
+  disjoint opt/eval split, text/VQA/code scoring utilities.
+
+Main command:
+
+```bash
+source scripts/env_unified.sh
+python run_maspo.py \
+  --dataset math500 \
+  --graph llm_agg --na 3 \
+  --optimize --fixed-rounds --beam-refresh --lookahead-score --misleading-sampling \
+  --experience-guided \
+  --seed 123 --sample-size 200 --opt-size 100 --max-concurrent 4
+```
+
+Aligned batch scripts:
+
+```bash
+nohup scripts/run_exhandoff_text_na3.sh > logs/egmap_na3.nohup 2>&1 &
+nohup scripts/run_exhandoff_text_nr2.sh > logs/egmap_nr2.nohup 2>&1 &
+nohup scripts/run_exhandoff_vqa_na3.sh > logs/egmap_vqa_na3.nohup 2>&1 &
+nohup scripts/run_exhandoff_vqa_nr2.sh > logs/egmap_vqa_nr2.nohup 2>&1 &
+```
+
+To reuse historical failures as experience, build a memory bank from prior
+result files first:
+
+```bash
+python scripts/build_experience_bank.py "result/*.json" \
+  --output memory/experience_bank.jsonl --overwrite
+```
+
+Official base provenance is recorded in `OFFICIAL_BASE.md`.
 
 ## **📣 News**
 - **[08/05/2026]** Our paper has been submitted to arXiv: [https://arxiv.org/abs/2605.06623](https://arxiv.org/abs/2605.06623)!

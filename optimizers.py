@@ -11,6 +11,15 @@ from prompts import (
     ANSWER_EVALUATE_TEMPLATE, INTERMEDIATE_COMPARE_TEMPLATE,
     FINAL_ANSWER_COMPARE_TEMPLATE
 )
+from prompts_structured import PROMPT_OPTIMIZE_TEMPLATE_STRUCTURED
+from handoff import (
+    HANDOFF_OPTIMIZE_TEMPLATE,
+    build_default_handoff_map,
+    edge_key,
+    normalize_handoff_map,
+    parse_edge_key,
+    sanitize_handoff,
+)
 from utils import async_call_llm, parse_comparison_result, extract_output
 from agents import MAS, InferenceCache
 import re
@@ -46,14 +55,48 @@ class AgentOptState:
 
 class MAPromptOptimizer:
 
-    def __init__(self, mas: MAS, train_questions: List[str], 
-                 seed_prompt_map: Dict[int, str], evaluator_client):
+    def __init__(self, mas: MAS, train_questions: List[str],
+                 seed_prompt_map: Dict[int, str], evaluator_client,
+                 seed_handoff_map: Optional[Dict[str, str]] = None,
+                 use_handoff: bool = False,
+                 use_structured_meta_prompt: bool = False,
+                 image_lookup: Optional[Dict[str, str]] = None,
+                 use_disagreement_handoff: bool = False):
         self.mas = mas
         self.train_q = train_questions
         self.seed = seed_prompt_map
         self.best_prompt = seed_prompt_map.copy()
         self.evaluator = evaluator_client
         self.task_type = mas.task_type
+        self.use_handoff = use_handoff
+        self.use_structured_meta_prompt = use_structured_meta_prompt
+        self.use_disagreement_handoff = use_disagreement_handoff
+        # question -> base64 image. Worker solving during optimization always sees
+        # the image (fair baseline for both baseline & v3). The "image gradient"
+        # (optimizer LLM sees the image to rewrite prompts) is v3-only.
+        self.image_lookup = image_lookup or {}
+        self.use_image_gradient = bool(self.image_lookup) and (use_structured_meta_prompt or use_handoff)
+        if seed_handoff_map is not None:
+            self.best_handoff = normalize_handoff_map(seed_handoff_map)
+        else:
+            self.best_handoff = build_default_handoff_map(mas.edges, mas.agents, mas.task_type)
+
+    def _make_mas(self, prompt_map: Optional[Dict[int, str]] = None,
+                  handoff_map: Optional[Dict[str, str]] = None) -> MAS:
+        mas = MAS(
+            self.mas.gtype, self.mas.task_type,
+            Ns=self.mas.Ns, Na=self.mas.Na, Nr=self.mas.Nr, Nd=self.mas.Nd,
+            use_handoff=self.use_handoff,
+            handoff_map=handoff_map or self.best_handoff,
+            use_disagreement_handoff=self.use_disagreement_handoff,
+        )
+        if prompt_map:
+            mas.inject_prompt_map(prompt_map)
+        return mas
+
+    @staticmethod
+    def _cached_context(cache: InferenceCache, agent_id: int, predecessors: List[int]) -> str:
+        return cache.node_inputs.get(agent_id) or cache.get_context_for_node(agent_id, predecessors)
 
     async def _compare(self, requirement: str, ans_a: str, ans_b: str, 
                        agent_id: int, question: str, context: str) -> bool:
@@ -161,8 +204,8 @@ class MAPromptOptimizer:
 
         return final_prompt
 
-    async def _propose_new_prompt(self, requirement: str, old_p: str, 
-                                  qa: Dict[str, Dict[str, str]], agent_id: int, 
+    async def _propose_new_prompt(self, requirement: str, old_p: str,
+                                  qa: Dict[str, Dict[str, str]], agent_id: int,
                                   question: str,
                                   successor_info: str = "") -> str:
         agent = self.mas.agents[agent_id]
@@ -172,7 +215,7 @@ class MAPromptOptimizer:
             f"Problem {i+1}:\n{q.strip()}\n\nContext:\n{data['context'].strip() or '(no context)'}\n\nAgent Output:\n{data['output'].strip()}"
             for i, (q, data) in enumerate(qa.items())
         ])
-    
+
         full_requirement = "Ensure the agent's role, responsibilities, and input format remain consistent. " + requirement
         audience_instruction = ""
         if successor_info:
@@ -182,21 +225,93 @@ class MAPromptOptimizer:
                 f"{successor_info}\n"
                 f"**Optimization Goal**: Crucially, modify the prompt so the output addresses the issues above and strictly adheres to constraints to help the downstream agent succeed."
             )
-        template = PROMPT_OPTIMIZE_TEMPLATE.get(
-            self.task_type, PROMPT_OPTIMIZE_TEMPLATE[TaskType.MATH]
+
+        # Handoff-aware augmentation: tell the optimizer about the inter-agent contract.
+        handoff_instruction = ""
+        if self.use_handoff:
+            predecessors = self.mas.get_predecessors(agent_id)
+            successors = [dst for src, dsts in self.mas.edges.items()
+                          for dst in dsts if src == agent_id]
+            sender_contracts = []
+            for dst in successors:
+                key = edge_key(agent_id, dst)
+                contract = self.best_handoff.get(key)
+                if contract:
+                    sender_contracts.append(f"Edge {key} (this agent -> Agent-{dst}):\n{contract}")
+            receiver_contracts = []
+            for src in predecessors:
+                key = edge_key(src, agent_id)
+                contract = self.best_handoff.get(key)
+                if contract:
+                    receiver_contracts.append(f"Edge {key} (Agent-{src} -> this agent):\n{contract}")
+            blocks = []
+            if sender_contracts:
+                blocks.append(
+                    "Sender role: this agent's output will be wrapped/structured according to the following handoff contract(s).\n"
+                    "The optimized prompt MUST instruct the agent to produce output that conforms to the required fields.\n\n"
+                    + "\n\n".join(sender_contracts)
+                )
+            if receiver_contracts:
+                blocks.append(
+                    "Receiver role: this agent receives upstream output wrapped in the following handoff block(s).\n"
+                    "The optimized prompt MUST instruct the agent to parse and verify these structured fields before reasoning.\n\n"
+                    + "\n\n".join(receiver_contracts)
+                )
+            if blocks:
+                handoff_instruction = (
+                    "\n\n[HANDOFF-AWARE OPTIMIZATION]\n"
+                    "This agent operates inside a multi-agent system with structured inter-agent handoffs.\n"
+                    + "\n\n".join(blocks)
+                    + "\n\n**Co-Optimization Goal**: Tailor the prompt so the agent natively works with the handoff schema "
+                    "(produce required sender fields and/or consume receiver fields). "
+                    "Do NOT redefine the handoff contract itself."
+                )
+        disagreement_instruction = ""
+        if self.use_disagreement_handoff:
+            predecessor_count = len(self.mas.get_predecessors(agent_id))
+            if predecessor_count > 1:
+                disagreement_instruction = (
+                    "\n\n[TOPOLOGY-AWARE OPTIMIZATION: MULTI-INPUT]\n"
+                    "This receiver may get an ADAPTIVE DISAGREEMENT HANDOFF block only when upstream agents produce "
+                    "conflicting extracted answers. The optimized prompt MUST instruct the agent to compare conflicting "
+                    "candidates, verify the decisive evidence/error, and avoid blind majority voting. If no block is "
+                    "present, follow the normal receiver behavior and keep the final answer format unchanged."
+                )
+            elif predecessor_count == 1:
+                disagreement_instruction = (
+                    "\n\n[TOPOLOGY-AWARE OPTIMIZATION: SEQUENTIAL]\n"
+                    "This receiver may get an ADAPTIVE SEQUENTIAL VERIFICATION block from its single predecessor. "
+                    "The optimized prompt MUST use it as a conservative trust-but-verify instruction: preserve the "
+                    "predecessor answer when it is supported, and revise only after identifying a concrete visual, "
+                    "logical, arithmetic, or test-based error. Keep the final answer format unchanged."
+                )
+
+        template_map = (
+            PROMPT_OPTIMIZE_TEMPLATE_STRUCTURED
+            if self.use_structured_meta_prompt
+            else PROMPT_OPTIMIZE_TEMPLATE
         )
-        augmented_requirements = full_requirement + audience_instruction
+        template = template_map.get(self.task_type, template_map[TaskType.MATH])
+        augmented_requirements = full_requirement + audience_instruction + handoff_instruction + disagreement_instruction
     
         prompt = template.format(
             agent_type=agent.type.value,
             role_description=role_desc,
-            requirements=full_requirement,
+            requirements=augmented_requirements,
             prompt=old_p,
             samples=samples_block,
         )
     
-        raw = await async_call_llm(self.evaluator, prompt, temperature=0.7, 
-                                   max_tokens=16384, use_ds_api=True)
+        # Image gradient (v3 only): let the optimizer LLM see the current sample's
+        # image so it rewrites the prompt with visual grounding in mind.
+        opt_images = None
+        if self.use_image_gradient:
+            b64 = self.image_lookup.get(question)
+            if b64:
+                opt_images = [b64]
+
+        raw = await async_call_llm(self.evaluator, prompt, temperature=0.7,
+                                   max_tokens=16384, use_ds_api=True, images=opt_images)
         try:
             raw_prompt = raw.split("<prompt>")[1].split("</prompt>")[0].strip()
             print(f"[DEBUG] Extracted prompt:\n{raw_prompt}\n")
@@ -206,15 +321,12 @@ class MAPromptOptimizer:
             return old_p
 
     async def _build_baseline_caches(self, questions: List[str], 
-                                      prompt_map: Dict[int, str]) -> Dict[str, InferenceCache]:
-        mas_temp = MAS(
-            self.mas.gtype, self.mas.task_type,
-            Ns=self.mas.Ns, Na=self.mas.Na, Nr=self.mas.Nr, Nd=self.mas.Nd
-        )
-        mas_temp.inject_prompt_map(prompt_map)
+                                      prompt_map: Dict[int, str],
+                                      handoff_map: Optional[Dict[str, str]] = None) -> Dict[str, InferenceCache]:
+        mas_temp = self._make_mas(prompt_map, handoff_map)
     
         async def run_one(q: str) -> Tuple[str, InferenceCache]:
-            _, cache = await mas_temp.arun_with_cache(q)
+            _, cache = await mas_temp.arun_with_cache(q, image=self.image_lookup.get(q))
             return q, cache
     
         results = await asyncio.gather(*[run_one(q) for q in questions])
@@ -241,18 +353,13 @@ class MAPromptOptimizer:
         
         async def process_pipeline(q: str):
             base_cache = baseline_caches[q]
-            mas_eval = MAS(
-                self.mas.gtype, self.mas.task_type,
-                Ns=self.mas.Ns, Na=self.mas.Na,
-                Nr=self.mas.Nr, Nd=self.mas.Nd
-            )
-            mas_eval.inject_prompt_map(temp_prompt_map)
-            result, _ = await mas_eval.arun_from_node(agent_id, base_cache, cand_prompt)
+            mas_eval = self._make_mas(temp_prompt_map)
+            result, _ = await mas_eval.arun_from_node(agent_id, base_cache, cand_prompt, image=self.image_lookup.get(q))
             cand_raw_trace = result["raw_trace"]
             
             base_output = base_cache.node_outputs_raw.get(agent_id, "")
             cand_output = cand_raw_trace.get(agent_id, "")
-            ctx = base_cache.get_context_for_node(agent_id, predecessors)
+            ctx = self._cached_context(base_cache, agent_id, predecessors)
             
             sample_info = {
                 "question": q,
@@ -535,13 +642,13 @@ class MAPromptOptimizer:
             qa_for_proposal1 = {}
             for q in samples_p1:
                 cache = local_baseline_caches[q]
-                ctx = cache.get_context_for_node(aid, preds)
+                ctx = self._cached_context(cache, aid, preds)
                 qa_for_proposal1[q] = {"context": ctx, "output": cache.node_outputs_raw.get(aid, "")}
 
             qa_for_proposal2 = {}
             for q in samples_p2:
                 cache = local_baseline_caches[q]
-                ctx = cache.get_context_for_node(aid, preds)
+                ctx = self._cached_context(cache, aid, preds)
                 qa_for_proposal2[q] = {"context": ctx, "output": cache.node_outputs_raw.get(aid, "")}
 
             sample1 = samples_p1[0] if samples_p1 else samples[0]
@@ -554,16 +661,19 @@ class MAPromptOptimizer:
             candidates = list(set(cand_prompts))
             candidate_scores = {}
 
-            for cand_p in candidates:
+            async def _score_candidate(cand_p: str):
                 if cand_p == node_prompt:
-                    candidate_scores[cand_p] = {"score": 0.0, "wins_global": len(samples)//2, "wins_local": len(samples)//2}
-                    continue
-                score_info = await self._evaluate_candidate(
+                    return cand_p, {"score": 0.0, "wins_global": len(samples)//2, "wins_local": len(samples)//2}
+                info = await self._evaluate_candidate(
                     cand_prompt=cand_p, agent_id=aid, eval_samples=samples,
                     baseline_caches=local_baseline_caches, temp_prompt_map=temp_prompt_map,
                     predecessors=preds, terminal_id=term_id, is_terminal=is_term, requirement=req
                 )
-                candidate_scores[cand_p] = score_info
+                return cand_p, info
+
+            scored = await asyncio.gather(*[_score_candidate(c) for c in candidates])
+            for cand_p, info in scored:
+                candidate_scores[cand_p] = info
 
             new_nodes = []
             local_best = {"prompt": node_prompt, "score": 0.0}
@@ -1011,13 +1121,13 @@ class MAPromptOptimizer:
         qa_for_proposal1 = {}
         for q in current_samples_p1:
             cache = local_baseline_caches[q]
-            ctx = cache.get_context_for_node(aid, preds)
+            ctx = self._cached_context(cache, aid, preds)
             qa_for_proposal1[q] = {"context": ctx, "output": cache.node_outputs_raw.get(aid, "")}
         
         qa_for_proposal2 = {}
         for q in current_samples_p2:
             cache = local_baseline_caches[q]
-            ctx = cache.get_context_for_node(aid, preds)
+            ctx = self._cached_context(cache, aid, preds)
             qa_for_proposal2[q] = {"context": ctx, "output": cache.node_outputs_raw.get(aid, "")}
         
         sample1 = current_samples_p1[0] if current_samples_p1 else samples[0]
@@ -1138,6 +1248,214 @@ class MAPromptOptimizer:
         }
 
 
+    def _edge_trace_samples(self, questions: List[str], caches: Dict[str, InferenceCache],
+                            edge: str) -> Dict[str, Dict[str, str]]:
+        src, dst = parse_edge_key(edge)
+        term_id = self.mas.get_terminal_id()
+        traces = {}
+        for q in questions:
+            cache = caches[q]
+            traces[q] = {
+                "sender_output": cache.node_outputs_raw.get(src, ""),
+                "receiver_context": cache.node_inputs.get(dst, ""),
+                "receiver_output": cache.node_outputs_raw.get(dst, ""),
+                "final_output": cache.node_outputs_raw.get(term_id, ""),
+            }
+        return traces
+
+    async def _propose_new_handoff(self, edge: str, old_handoff: str,
+                                   traces: Dict[str, Dict[str, str]]) -> str:
+        src, dst = parse_edge_key(edge)
+        src_agent = self.mas.agents[src]
+        dst_agent = self.mas.agents[dst]
+        samples_block = "\n\n".join([
+            (
+                f"Problem {i+1}:\n{question.strip()}\n\n"
+                f"Sender output:\n{data['sender_output'].strip() or '(empty)'}\n\n"
+                f"Receiver context:\n{data['receiver_context'].strip()[:1200] or '(empty)'}\n\n"
+                f"Receiver output:\n{data['receiver_output'].strip() or '(empty)'}\n\n"
+                f"Final output:\n{data['final_output'].strip() or '(empty)'}"
+            )
+            for i, (question, data) in enumerate(traces.items())
+        ])
+        prompt = HANDOFF_OPTIMIZE_TEMPLATE.format(
+            src_id=src,
+            dst_id=dst,
+            src_type=src_agent.type.value,
+            dst_type=dst_agent.type.value,
+            src_prompt=self.best_prompt.get(src, ""),
+            dst_prompt=self.best_prompt.get(dst, ""),
+            handoff=old_handoff,
+            samples=samples_block,
+        )
+        # Image gradient (v3 only): show one representative image so handoff
+        # contract rewriting is also visually grounded.
+        opt_images = None
+        if self.use_image_gradient:
+            for q in traces.keys():
+                b64 = self.image_lookup.get(q)
+                if b64:
+                    opt_images = [b64]
+                    break
+        raw = await async_call_llm(
+            self.evaluator, prompt, temperature=0.7,
+            max_tokens=16384, use_ds_api=True, images=opt_images
+        )
+        try:
+            raw_handoff = raw.split("<handoff>")[1].split("</handoff>")[0].strip()
+            return sanitize_handoff(raw_handoff, old_handoff)
+        except IndexError:
+            print("[WARN] Failed to extract <handoff>...</handoff>, falling back.")
+            return old_handoff
+
+    async def _evaluate_handoff_candidate(self,
+                                          edge: str,
+                                          cand_handoff: str,
+                                          eval_samples: List[str],
+                                          baseline_caches: Dict[str, InferenceCache],
+                                          temp_prompt_map: Dict[int, str],
+                                          requirement: str) -> Dict[str, Any]:
+        src, dst = parse_edge_key(edge)
+        terminal_id = self.mas.get_terminal_id()
+        candidate_handoff_map = self.best_handoff.copy()
+        candidate_handoff_map[edge] = cand_handoff
+
+        async def process_pipeline(q: str):
+            base_cache = baseline_caches[q]
+            mas_eval = self._make_mas(temp_prompt_map, candidate_handoff_map)
+            result, _ = await mas_eval.arun_from_node(src, base_cache, image=self.image_lookup.get(q))
+            cand_raw_trace = result["raw_trace"]
+
+            base_final = base_cache.node_outputs_raw.get(terminal_id, "")
+            cand_final = cand_raw_trace.get(terminal_id, "")
+            tasks = [
+                self._compare_final_answer(q, requirement, cand_final, base_final)
+            ]
+            metas = [{"type": "global", "question": q}]
+
+            if dst != terminal_id:
+                base_receiver = base_cache.node_outputs_raw.get(dst, "")
+                cand_receiver = cand_raw_trace.get(dst, "")
+                if base_receiver and cand_receiver:
+                    tasks.append(self._compare_intermediate(q, cand_receiver, base_receiver))
+                    metas.append({"type": "receiver", "question": q})
+
+            scores = await asyncio.gather(*tasks)
+            return scores, metas
+
+        all_pipelines = await asyncio.gather(*[process_pipeline(q) for q in eval_samples])
+        results = []
+        metas = []
+        for scores, local_metas in all_pipelines:
+            results.extend(scores)
+            metas.extend(local_metas)
+
+        global_scores = [score for score, meta in zip(results, metas) if meta["type"] == "global"]
+        receiver_scores = [score for score, meta in zip(results, metas) if meta["type"] == "receiver"]
+        global_rate = sum(global_scores) / len(global_scores) if global_scores else 0.0
+        receiver_rate = sum(receiver_scores) / len(receiver_scores) if receiver_scores else global_rate
+        win_rate = 0.7 * global_rate + 0.3 * receiver_rate
+
+        bad_cases = []
+        for q, score in zip(eval_samples, global_scores):
+            if not score:
+                cache = baseline_caches[q]
+                bad_cases.append({
+                    "question": q,
+                    "sender_output": cache.node_outputs_raw.get(src, ""),
+                    "receiver_output": cache.node_outputs_raw.get(dst, ""),
+                })
+
+        return {
+            "score": win_rate - 0.5,
+            "global_rate": global_rate,
+            "receiver_rate": receiver_rate,
+            "bad_cases": bad_cases[:3],
+        }
+
+    async def optimize_all_handoffs(self,
+                                    requirement: str = " ",
+                                    max_rounds: int = 3) -> Tuple[Dict[str, str], Dict[str, Any]]:
+        if not self.use_handoff:
+            self.use_handoff = True
+
+        edges = [
+            edge_key(src, dst)
+            for src, dsts in self.mas.edges.items()
+            for dst in dsts
+        ]
+        stats: Dict[str, Any] = {"edge_stats": {}}
+
+        with tqdm(total=len(edges) * max_rounds, desc="[HANDOFF]") as pbar:
+            for edge in edges:
+                src, dst = parse_edge_key(edge)
+                edge_records = []
+                for round_idx in range(max_rounds):
+                    eval_samples = random.sample(self.train_q, min(10, len(self.train_q)))
+                    mid = len(eval_samples) // 2
+                    samples_p1 = eval_samples[:mid]
+                    samples_p2 = eval_samples[mid:]
+                    baseline_caches = await self._build_baseline_caches(
+                        eval_samples, self.best_prompt, self.best_handoff
+                    )
+
+                    old_handoff = self.best_handoff[edge]
+                    traces_1 = self._edge_trace_samples(samples_p1, baseline_caches, edge)
+                    traces_2 = self._edge_trace_samples(samples_p2, baseline_caches, edge)
+                    proposals = await asyncio.gather(
+                        self._propose_new_handoff(edge, old_handoff, traces_1),
+                        self._propose_new_handoff(edge, old_handoff, traces_2),
+                    )
+                    candidates = list(dict.fromkeys([old_handoff] + proposals))
+
+                    async def evaluate_candidate(handoff_text: str) -> Tuple[str, Dict[str, Any]]:
+                        if handoff_text == old_handoff:
+                            return handoff_text, {
+                                "score": 0.0,
+                                "global_rate": 0.5,
+                                "receiver_rate": 0.5,
+                                "bad_cases": [],
+                            }
+                        info = await self._evaluate_handoff_candidate(
+                            edge=edge,
+                            cand_handoff=handoff_text,
+                            eval_samples=eval_samples,
+                            baseline_caches=baseline_caches,
+                            temp_prompt_map=self.best_prompt,
+                            requirement=requirement,
+                        )
+                        return handoff_text, info
+
+                    eval_results = await asyncio.gather(*[
+                        evaluate_candidate(candidate) for candidate in candidates
+                    ])
+                    scored = {candidate: info for candidate, info in eval_results}
+                    best_candidate = max(candidates, key=lambda c: scored[c]["score"])
+                    best_info = scored[best_candidate]
+
+                    if best_candidate != old_handoff and best_info["score"] > 0:
+                        self.best_handoff[edge] = best_candidate
+
+                    record = {
+                        "round": round_idx,
+                        "src": src,
+                        "dst": dst,
+                        "updated": best_candidate != old_handoff and best_info["score"] > 0,
+                        "score": best_info["score"],
+                        "global_rate": best_info["global_rate"],
+                        "receiver_rate": best_info["receiver_rate"],
+                    }
+                    edge_records.append(record)
+                    pbar.set_postfix_str(
+                        f"{edge} r{round_idx+1} score={best_info['score']:.3f}"
+                    )
+                    pbar.update(1)
+
+                stats["edge_stats"][edge] = edge_records
+
+        return self.best_handoff, stats
+
+
     def _get_dynamic_context(self, agent_states: Dict[int, AgentOptState], 
                            current_agent_id: int, 
                            current_depth: int) -> Dict[int, str]:
@@ -1171,14 +1489,10 @@ class MAPromptOptimizer:
 
         assert len(questions) == len(prompt_maps), "Questions and prompt_maps must align"
         async def run_one(q: str, p_map: Dict[int, str]) -> Tuple[str, InferenceCache]:
-            mas_temp = MAS(
-                self.mas.gtype, self.mas.task_type,
-                Ns=self.mas.Ns, Na=self.mas.Na, Nr=self.mas.Nr, Nd=self.mas.Nd
-            )
-            mas_temp.inject_prompt_map(p_map)
-            _, cache = await mas_temp.arun_with_cache(q)
+            mas_temp = self._make_mas(p_map)
+            _, cache = await mas_temp.arun_with_cache(q, image=self.image_lookup.get(q))
             return q, cache
-    
+
         results = await asyncio.gather(*[
             run_one(q, p_map) for q, p_map in zip(questions, prompt_maps)
         ])
@@ -1293,7 +1607,7 @@ class MAPromptOptimizer:
                 qa_for_proposal = {}
                 for q in eval_samples:
                     cache = baseline_caches[q]
-                    ctx = cache.get_context_for_node(agent_id, predecessors)
+                    ctx = self._cached_context(cache, agent_id, predecessors)
                     output = cache.node_outputs_raw.get(agent_id, "")
                     qa_for_proposal[q] = {"context": ctx, "output": output}
                 

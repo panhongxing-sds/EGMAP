@@ -1,9 +1,17 @@
 
+import os
 import asyncio
-from collections import defaultdict, deque
+from collections import Counter, defaultdict, deque
 from typing import List, Dict, Any, Optional, Tuple, Set
 
 from config import GraphType, AgentType, TaskType, aclient
+from handoff import (
+    build_default_handoff_map,
+    format_receiver_context,
+    format_sender_guidance,
+    normalize_handoff_map,
+)
+from disagreement import format_disagreement_context, format_sequential_verification_context
 from prompts import get_agent_template, COMPRESS_PROMPTS
 from utils import (
     async_call_llm, extract_answer, extract_code, extract_output,
@@ -85,21 +93,21 @@ class Agent:
         self.template = get_agent_template(task_type, agent_type)
         self.last_raw = ""
 
-    async def arun(self, question: str, context: Optional[Any] = None, *, extract: bool = True) -> str:
+    async def arun(self, question: str, context: Optional[Any] = None, *, extract: bool = True, image: Optional[str] = None) -> str:
         if self.type is AgentType.AGGREGATOR:
             return self._aggregate(context or [])
 
         try:
             prompt = self.template.format(
-                question=question, 
+                question=question,
                 context=context if context is not None else ""
             )
         except (KeyError, IndexError) as e:
             print(f"⚠️ Format error: {e}")
             prompt = self.template.replace("{question}", str(question))
             prompt = prompt.replace("{context}", str(context) if context else "")
-        
-        raw = await async_call_llm(aclient, prompt, temperature=0.0)
+
+        raw = await async_call_llm(aclient, prompt, temperature=0.0, images=[image] if image else None)
         self.last_raw = raw
         
         if self.type is AgentType.PREDICTOR and not extract:
@@ -110,7 +118,7 @@ class Agent:
         
         return extract_output(raw, self.task_type) if extract else raw
 
-    async def arun_full(self, question: str, context: Optional[str] = None) -> Tuple[str, str]:
+    async def arun_full(self, question: str, context: Optional[str] = None, *, image: Optional[str] = None) -> Tuple[str, str]:
 
         if self.type is AgentType.AGGREGATOR:
             result = self._aggregate(context.split("\n---\n") if context else [])
@@ -118,20 +126,39 @@ class Agent:
 
         try:
             prompt = self.template.format(
-                question=question, 
+                question=question,
                 context=context if context is not None else ""
             )
         except (KeyError, IndexError):
             prompt = self.template.replace("{question}", str(question))
             prompt = prompt.replace("{context}", str(context) if context else "")
-        
-        raw = await async_call_llm(aclient, prompt, temperature=0.0)
+
+        # v5 self-consistency: text PREDICTOR runs SC_N samples + majority vote
+        # only applies to text task types (MATH/MATH_CHOICE/REASONING_CHOICE/CODE), VQA unchanged
+        _TEXT_TASKS = {TaskType.MATH, TaskType.MATH_CHOICE, TaskType.REASONING_CHOICE, TaskType.CODE}
+        _SC_N = int(os.environ.get("SELF_CONSISTENCY_N", "1"))
+        if self.type is AgentType.PREDICTOR and self.task_type in _TEXT_TASKS and _SC_N > 1:
+            samples = []
+            for _i in range(_SC_N):
+                raw_i = await async_call_llm(
+                    aclient, prompt, temperature=0.7, images=[image] if image else None
+                )
+                ans_i = extract_output(raw_i, self.task_type) if raw_i else None
+                samples.append((raw_i, ans_i))
+            answers = [s[1] for s in samples if s[1]]
+            if answers:
+                majority_ans, _ = Counter(answers).most_common(1)[0]
+                raw = next((s[0] for s in samples if s[1] == majority_ans), samples[0][0])
+            else:
+                raw = samples[0][0]
+        else:
+            raw = await async_call_llm(aclient, prompt, temperature=0.0, images=[image] if image else None)
         self.last_raw = raw
-        
+
         compress_template = COMPRESS_PROMPTS.get(self.task_type, COMPRESS_PROMPTS[TaskType.MATH])
         compress_prompt = compress_template.format(raw=raw)
         short = await async_call_llm(aclient, compress_prompt, 0.0)
-        
+
         return raw, short
 
     def _aggregate(self, answers: List[str]) -> str:
@@ -161,21 +188,34 @@ class MAS:
     
     def __init__(self, graph_type: GraphType, task_type: TaskType,
                  Ns: int = 1, Na: int = 1, Nr: int = 1, Nd: int = 1,
-                 use_judge: bool = False, judge_client=None):
+                 use_judge: bool = False, judge_client=None,
+                 use_handoff: bool = False,
+                 handoff_map: Optional[Dict[str, str]] = None,
+                 use_disagreement_handoff: bool = False):
         self.gtype = graph_type
         self.task_type = task_type
         self.Ns, self.Na, self.Nr, self.Nd = Ns, Na, Nr, Nd
         self.agents: List[Agent] = []
         self.edges: Dict[int, List[int]] = {}
         self._build()
+        self.use_handoff = use_handoff
+        self.use_disagreement_handoff = use_disagreement_handoff
+        self.handoff_map = build_default_handoff_map(self.edges, self.agents, task_type)
+        if handoff_map:
+            self.handoff_map.update(normalize_handoff_map(handoff_map))
         
         self.use_judge = use_judge
         if use_judge:
             if task_type == TaskType.CODE:
                 self.judge = CodeJudgeAgent()
             else:
-                problem_type = "multi-choice problem" if task_type in [TaskType.MATH_CHOICE, TaskType.REASONING_CHOICE] else "math problem"
-                self.judge = LLMJudgeAgent(judge_client, problem_type)
+                if task_type in [TaskType.MATH_CHOICE, TaskType.REASONING_CHOICE, TaskType.VQA_CHOICE]:
+                    problem_type = "multi-choice problem"
+                elif task_type == TaskType.VQA_OPEN:
+                    problem_type = "open-ended visual question answering problem"
+                else:
+                    problem_type = "math problem"
+                self.judge = LLMJudgeAgent(judge_client, problem_type, fail_default=(task_type != TaskType.VQA_OPEN))
         else:
             self.judge = None
 
@@ -337,13 +377,61 @@ class MAS:
             if aid < len(self.agents) and self.agents[aid].type != AgentType.AGGREGATOR:
                 self.agents[aid].template = p
 
+    def inject_handoff_map(self, handoff_map: Dict[str, str]):
+        self.handoff_map.update(normalize_handoff_map(handoff_map))
 
-    async def arun(self, question: str, context: Optional[str] = None) -> Dict[str, Any]:
-        result, _ = await self.arun_with_cache(question, context)
+    def get_handoff_map(self) -> Dict[str, str]:
+        return self.handoff_map.copy()
+
+    def _question_with_sender_handoff(self, question: str, agent_id: int) -> str:
+        if not self.use_handoff:
+            return question
+        successors = self.get_successors(agent_id)
+        if not successors:
+            return question
+        guidance = format_sender_guidance(agent_id, successors, self.handoff_map)
+        if not guidance:
+            return question
+        return f"{question}\n\n{guidance}"
+
+    def _context_for_node(self, cache: InferenceCache, agent_id: int,
+                          predecessors: List[int], use_short: bool = True) -> str:
+        if not predecessors:
+            return ""
+        outputs = cache.node_outputs_short if use_short else cache.node_outputs_raw
+        report_outputs = cache.node_outputs_raw or outputs
+        if not self.use_handoff:
+            base_context = cache.get_context_for_node(agent_id, predecessors, use_short=use_short)
+            if self.use_disagreement_handoff:
+                if len(predecessors) > 1:
+                    report = format_disagreement_context(agent_id, predecessors, report_outputs, self.task_type)
+                else:
+                    report = format_sequential_verification_context(agent_id, predecessors[0], report_outputs, self.task_type)
+                return f"{report}\n\n{base_context}" if report else base_context
+            return base_context
+
+        # Handoff-MASPO passes edge-aware, receiver-visible contracts in context.
+        blocks = []
+        for pred_id in predecessors:
+            if pred_id in outputs:
+                blocks.append(
+                    format_receiver_context(pred_id, agent_id, outputs.get(pred_id, ""), self.handoff_map)
+                )
+        base_context = "\n---\n".join(blocks)
+        if self.use_disagreement_handoff:
+            if len(predecessors) > 1:
+                report = format_disagreement_context(agent_id, predecessors, report_outputs, self.task_type)
+            else:
+                report = format_sequential_verification_context(agent_id, predecessors[0], report_outputs, self.task_type)
+            return f"{report}\n\n{base_context}" if report else base_context
+        return base_context
+
+    async def arun(self, question: str, context: Optional[str] = None, *, image: Optional[str] = None) -> Dict[str, Any]:
+        result, _ = await self.arun_with_cache(question, context, image=image)
         return result
 
-    async def arun_with_cache(self, question: str, 
-                               context: Optional[str] = None) -> Tuple[Dict[str, Any], InferenceCache]:
+    async def arun_with_cache(self, question: str,
+                               context: Optional[str] = None, *, image: Optional[str] = None) -> Tuple[Dict[str, Any], InferenceCache]:
         cache = InferenceCache()
         cache.set_question(question)
         
@@ -358,19 +446,20 @@ class MAS:
                 
                 if predecessors:
                     if agent.type == AgentType.AGGREGATOR:
-                        ctx = cache.get_context_for_node(agent_id, predecessors, use_short=False)
+                        ctx = self._context_for_node(cache, agent_id, predecessors, use_short=False)
                     else:
-                        ctx = cache.get_context_for_node(agent_id, predecessors, use_short=True)
+                        ctx = self._context_for_node(cache, agent_id, predecessors, use_short=True)
                 else:
                     ctx = context
                 
-                tasks.append(self._run_single_agent(agent, question, ctx, agent_id == terminal_id))
+                q_with_handoff = self._question_with_sender_handoff(question, agent_id)
+                tasks.append(self._run_single_agent(agent, q_with_handoff, ctx, agent_id == terminal_id, image=image))
             
             results = await asyncio.gather(*tasks)
             
             for agent_id, (raw, short) in zip(level, results):
                 predecessors = self.get_predecessors(agent_id)
-                ctx = cache.get_context_for_node(agent_id, predecessors) if predecessors else (context or "")
+                ctx = self._context_for_node(cache, agent_id, predecessors) if predecessors else (context or "")
                 cache.set_node_data(agent_id, ctx, raw, short)
         
         final_raw = cache.node_outputs_raw.get(terminal_id, "")
@@ -382,9 +471,9 @@ class MAS:
             "short_trace": cache.node_outputs_short.copy(),
         }, cache
 
-    async def _run_single_agent(self, agent: Agent, question: str, 
-                                 context: Optional[str], is_terminal: bool) -> Tuple[str, str]:
-        raw, short = await agent.arun_full(question, context)
+    async def _run_single_agent(self, agent: Agent, question: str,
+                                 context: Optional[str], is_terminal: bool, *, image: Optional[str] = None) -> Tuple[str, str]:
+        raw, short = await agent.arun_full(question, context, image=image)
         
 
         if agent.type == AgentType.AGGREGATOR:
@@ -396,9 +485,9 @@ class MAS:
         
         return raw, short
 
-    async def arun_from_node(self, start_node: int, 
+    async def arun_from_node(self, start_node: int,
                               base_cache: InferenceCache,
-                              new_prompt: Optional[str] = None) -> Tuple[Dict[str, Any], InferenceCache]:
+                              new_prompt: Optional[str] = None, *, image: Optional[str] = None) -> Tuple[Dict[str, Any], InferenceCache]:
         question = base_cache.question
         terminal_id = self.get_terminal_id()
         
@@ -423,9 +512,10 @@ class MAS:
                 agent = self.agents[agent_id]
                 predecessors = self.get_predecessors(agent_id)
                 
-                ctx = new_cache.get_context_for_node(agent_id, predecessors, use_short=True)
+                ctx = self._context_for_node(new_cache, agent_id, predecessors, use_short=True)
                 
-                raw, short = await agent.arun_full(question, ctx if ctx else None)
+                q_with_handoff = self._question_with_sender_handoff(question, agent_id)
+                raw, short = await agent.arun_full(q_with_handoff, ctx if ctx else None, image=image)
                 
                 if agent_id == terminal_id:
                     short = extract_output(raw, self.task_type)
@@ -445,8 +535,8 @@ class MAS:
             if original_template is not None:
                 self.agents[start_node].template = original_template
 
-    async def arun_single_node_only(self, agent_id: int, question: str, 
-                                     context: str, new_prompt: Optional[str] = None) -> Tuple[str, str]:
+    async def arun_single_node_only(self, agent_id: int, question: str,
+                                     context: str, new_prompt: Optional[str] = None, *, image: Optional[str] = None) -> Tuple[str, str]:
         agent = self.agents[agent_id]
         
         original_template = None
@@ -455,7 +545,7 @@ class MAS:
             agent.template = new_prompt
         
         try:
-            raw, short = await agent.arun_full(question, context)
+            raw, short = await agent.arun_full(question, context, image=image)
             return raw, short
         finally:
             if original_template is not None:

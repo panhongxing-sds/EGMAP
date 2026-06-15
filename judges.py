@@ -16,19 +16,25 @@ class LLMJudgeAgent:
         "Correct:"
     )
 
-    def __init__(self, client, problem_type: str = "math problem"):
+    def __init__(self, client, problem_type: str = "math problem", fail_default: bool = False):
         self.client = client
         self.problem_type = problem_type
+        self.fail_default = fail_default
 
     async def ajudge(self, question: str, gold: str, raw_output: str) -> bool:
         prompt = self._TEMPLATE.format(
             problem_type=self.problem_type,
-            question=question, 
-            gold=gold, 
-            raw_output=raw_output
+            question=question,
+            gold=gold,
+            raw_output=raw_output,
         )
-        resp = await async_call_llm(self.client, prompt, temperature=0.0)
-        return resp.strip().lower() == "true"
+        try:
+            resp = await async_call_llm(self.client, prompt, temperature=0.0)
+            if not resp:
+                return self.fail_default
+            return resp.strip().lower() == "true"
+        except Exception:
+            return self.fail_default
 
 
 class CodeJudgeAgent:
