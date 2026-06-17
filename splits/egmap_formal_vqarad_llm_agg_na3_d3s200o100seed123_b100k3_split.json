@@ -1,5 +1,5 @@
 {
-  "tag": "egmap_formal_vqarad_llm_agg_na3_d3s200o100seed123_b100k3",
+  "tag": "egmap_formal_vqarad_llm_agg_na3_d3s200o100seed123_b100k3_m4b",
   "dataset": "vqarad",
   "graph": "llm_agg",
   "seed": 123,
@@ -310,6 +310,6 @@
     "img_206.jpg#206",
     "img_33.jpg#33"
   ],
-  "bank_path": "memory/egmap_formal_vqarad_llm_agg_na3_d3s200o100seed123_b100k3_bank.jsonl",
+  "bank_path": "memory/egmap_formal_vqarad_llm_agg_na3_d3s200o100seed123_b100k3_m4b_bank.jsonl",
   "no_eval_leakage": true
 }

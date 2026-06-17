@@ -24,10 +24,13 @@ echo "[$(date '+%F %T')] starting multimodal 4B @ :${PORT}" | tee -a "${LOG}"
 nohup "${VLLM_PY}" -m vllm.entrypoints.cli.main serve "${MODEL_PATH}" \
   --host 0.0.0.0 --port "${PORT}" \
   --tensor-parallel-size 1 --max-model-len 32768 \
+  --gpu-memory-utilization 0.68 \
   --reasoning-parser qwen3 \
+  --enforce-eager \
+  --gdn-prefill-backend triton \
   >> "${LOG}" 2>&1 &
 
-for i in $(seq 1 90); do
+for i in $(seq 1 180); do
   if curl -sf "http://127.0.0.1:${PORT}/v1/models" >/dev/null 2>&1; then
     echo "[$(date '+%F %T')] multimodal 4B ready @ :${PORT}" | tee -a "${LOG}"
     exit 0

@@ -35,6 +35,9 @@ fi
 echo "[EGMAP-P2a] profile=${FORMAL_MODEL_PROFILE} seed=${SEED} datasets=[${DATASETS}] graph=${GRAPH}"
 
 for dataset in ${DATASETS}; do
+  if formal_skip_vqa_unless_enabled "${dataset}"; then
+    continue
+  fi
   base_tag="egmap_formal_${dataset}_${GRAPH}_na${NA}_d${DEPTH}s${SAMPLE_SIZE}o${OPT_SIZE}seed${SEED}_b${BANK_SIZE}k${TOP_K}"
   tag="${base_tag}${FORMAL_TAG_SUFFIX}"
   out="result/${tag}.json"
@@ -74,6 +77,13 @@ for dataset in ${DATASETS}; do
     "${PY}" scripts/preflight_egmap.py --dataset "${dataset}" --seed "${SEED}" \
       --graph "${GRAPH}" --check-eval \
       > "logs/postflight_${dataset}_seed${SEED}.log" 2>&1 || true
+    ms="result/maspo_formal_${dataset}_${GRAPH}_na${NA}_d${DEPTH}s${SAMPLE_SIZE}o${OPT_SIZE}seed${SEED}${FORMAL_TAG_SUFFIX}.json"
+    if [[ -f "${ms}" ]]; then
+      echo "[fair] EGMAP+MASPO ${dataset} seed=${SEED}"
+      "${PY}" scripts/fair_pair_postprocess.py --dataset "${dataset}" --seed "${SEED}" \
+        --model-suffix "${FORMAL_MODEL_PROFILE}" --write \
+        >> "logs/fair_${dataset}_seed${SEED}${FORMAL_TAG_SUFFIX}.log" 2>&1 || true
+    fi
     "${PY}" scripts/update_result_ledger.py --seed "${SEED}" --graph "${GRAPH}"
     acc=$("${PY}" -c "import json; print(json.load(open('${out}'))['graph_types']['llm_agg']['accuracy'])" 2>/dev/null || echo "?")
     echo "[$(date '+%F %T')] [done] ${out} acc=${acc}"

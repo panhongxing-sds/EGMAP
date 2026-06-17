@@ -164,17 +164,31 @@ result/maspo_formal_{ds}_llm_agg_na3_d3s200o100seed{S}.json   # split_info.hando
 
 | Dataset | Method | Model | Acc | Bank | Protocol | Updated | File |
 |---------|--------|-------|----:|-----:|:--------:|---------|------|
-| math500 | MASPO | m4b | 85.6% | — | yes | 2026-06-15 06:29 UTC | `maspo_formal_math500_llm_agg_na3_d3s200o100seed123_m4b.json` |
+| math500 | MASPO | m4b | 85.7% | — | yes | 2026-06-16 10:06 UTC | `maspo_formal_math500_llm_agg_na3_d3s200o100seed123_m4b.json` |
 | math500 | EGMAP | legacy | 89.7% | 0 | yes | 2026-06-15 03:06 UTC | `egmap_formal_math500_llm_agg_na3_d3s200o100seed123_b100k3.json` |
+| math500 | EGMAP | m4b | 85.2% | 14 | yes | 2026-06-16 10:06 UTC | `egmap_formal_math500_llm_agg_na3_d3s200o100seed123_b100k3_m4b.json` |
+| math500 | EGMAP | m4b | 83.0% | — | yes | 2026-06-16 08:25 UTC | `egmap_formal_math500_llm_agg_na3_d3s200o100seed123_b100k3_m4b_nobank.json` |
 | aqua | MASPO | legacy | 91.4% | — | **no** invalid pseudo-MASPO | 2026-06-15 03:06 UTC | `maspo_formal_aqua_llm_agg_na3_d3s200o100seed123.json` |
-| aqua | MASPO | m4b | 90.1% | — | yes | 2026-06-15 07:30 UTC | `maspo_formal_aqua_llm_agg_na3_d3s200o100seed123_m4b.json` |
+| aqua | MASPO | m4b | 89.6% | — | yes | 2026-06-16 08:26 UTC | `maspo_formal_aqua_llm_agg_na3_d3s200o100seed123_m4b.json` |
 | aqua | EGMAP | legacy | 90.8% | 8 | yes | 2026-06-15 03:06 UTC | `egmap_formal_aqua_llm_agg_na3_d3s200o100seed123_b100k3.json` |
+| aqua | EGMAP | m4b | 92.2% | 9 | yes | 2026-06-16 08:26 UTC | `egmap_formal_aqua_llm_agg_na3_d3s200o100seed123_b100k3_m4b.json` |
+| aqua | EGMAP | m4b | 91.6% | — | yes | 2026-06-16 08:51 UTC | `egmap_formal_aqua_llm_agg_na3_d3s200o100seed123_b100k3_m4b_nobank.json` |
 | gpqa | MASPO | legacy | 82.4% | — | **no** invalid pseudo-MASPO | 2026-06-15 03:06 UTC | `maspo_formal_gpqa_llm_agg_na3_d3s200o100seed123.json` |
+| gpqa | MASPO | m4b | 71.3% | — | yes | 2026-06-16 08:26 UTC | `maspo_formal_gpqa_llm_agg_na3_d3s200o100seed123_m4b.json` |
 | gpqa | EGMAP | legacy | 86.5% | 7 | yes | 2026-06-15 03:06 UTC | `egmap_formal_gpqa_llm_agg_na3_d3s200o100seed123_b100k3.json` |
+| gpqa | EGMAP | m4b | 75.5% | 21 | yes | 2026-06-16 08:26 UTC | `egmap_formal_gpqa_llm_agg_na3_d3s200o100seed123_b100k3_m4b.json` |
+| gpqa | EGMAP | m4b | 72.4% | — | yes | 2026-06-16 08:44 UTC | `egmap_formal_gpqa_llm_agg_na3_d3s200o100seed123_b100k3_m4b_nobank.json` |
 | agieval | MASPO | legacy | 89.3% | — | **no** invalid pseudo-MASPO | 2026-06-15 03:06 UTC | `maspo_formal_agieval_llm_agg_na3_d3s200o100seed123.json` |
+| agieval | MASPO | m4b | 84.1% | — | yes | 2026-06-16 09:04 UTC | `maspo_formal_agieval_llm_agg_na3_d3s200o100seed123_m4b.json` |
 | agieval | EGMAP | legacy | 89.3% | 24 | yes | 2026-06-15 03:06 UTC | `egmap_formal_agieval_llm_agg_na3_d3s200o100seed123_b100k3.json` |
+| agieval | EGMAP | m4b | 88.7% | 22 | yes | 2026-06-16 09:04 UTC | `egmap_formal_agieval_llm_agg_na3_d3s200o100seed123_b100k3_m4b.json` |
 | humaneval | MASPO | legacy | 86.9% | — | **no** invalid pseudo-MASPO | 2026-06-15 03:06 UTC | `maspo_formal_humaneval_llm_agg_na3_d3s200o100seed123.json` |
+| humaneval | MASPO | m4b | 84.1% | — | yes | 2026-06-16 09:15 UTC | `maspo_formal_humaneval_llm_agg_na3_d3s200o100seed123_m4b.json` |
 | humaneval | EGMAP | legacy | 91.8% | — | yes | 2026-06-15 03:06 UTC | `egmap_formal_humaneval_llm_agg_na3_d3s200o100seed123_b100k3.json` |
+| humaneval | EGMAP | m4b | 93.7% | 6 | yes | 2026-06-16 09:15 UTC | `egmap_formal_humaneval_llm_agg_na3_d3s200o100seed123_b100k3_m4b.json` |
+| vqarad | MASPO | m4b | 61.5% | — | yes | 2026-06-17 05:11 UTC | `maspo_formal_vqarad_llm_agg_na3_d3s200o100seed123_m4b.json` |
+| slake | MASPO | m4b | 63.0% | — | yes | 2026-06-17 06:02 UTC | `maspo_formal_slake_llm_agg_na3_d3s200o100seed123_m4b.json` |
+| chartqa | MASPO | m4b | 80.0% | — | yes | 2026-06-17 06:37 UTC | `maspo_formal_chartqa_llm_agg_na3_d3s200o100seed123_m4b.json` |
 
 <!-- RESULT_LEDGER_END -->
 

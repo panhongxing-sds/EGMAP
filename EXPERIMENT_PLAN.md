@@ -1,320 +1,479 @@
-# EGMAP 正式实验计划
+# EGMAP 正式实验计划与运行手册
 
-> 最后更新：2026-06-11  
-> 仓库基线：[OFFICIAL_BASE.md](OFFICIAL_BASE.md)（官方 MASPO @ `e79aa8e`）
-
----
-
-## 1. 核心原则：两条独立协议
-
-| 维度 | **官方 MASPO（Baseline）** | **EGMAP / ExHandoff（Ours）** |
-|------|---------------------------|------------------------------|
-| 代码入口 | `run_maspo_formal_one_seed.py` 或 `run_maspo.py`（**无** `--experience-guided`） | `run_egmap_formal_one_seed.py` 或 `run_maspo.py --experience-guided` |
-| Prompt 优化 | 仅 **节点 prompt**；官方 fixed-rounds + beam-refresh + misleading-sampling + lookahead-score | 节点 prompt + **handoff 优化** + structured meta-prompt |
-| 推理执行 | **单路** `MAS.arun()`，默认拓扑 | handoff + disagreement verification + **residual selector** + experience retrieval |
-| Handoff map | **不使用** | `prompt/egmap_formal_*_handoffs.json` |
-| Experience bank | **不使用** | `memory/egmap_formal_*_bank.jsonl`（仅 opt 错题构建） |
-| 结果 tag | `maspo_formal_{ds}_...` | `egmap_formal_{ds}_..._b100k3` |
-
-### ⚠️ 已废弃的错误 baseline
-
-此前 `run_maspo_formal_baseline.py` 错误地开启了：
-
-- `use_handoff=True`
-- `use_disagreement_handoff=True`
-- `use_residual_selector=True`
-- 读取 `egmap_formal_*_handoffs.json`
-
-这 **不是** 官方 MASPO，而是「EGMAP 去掉 experience」的变体。  
-`result/maspo_formal_*.json`（旧版）**全部作废**，不得写入论文或 `comparison_table.md`。
-
-公平对照的唯一合法定义：
-
-- **同数据集、同 seed、同 opt/eval 划分**（共用 `splits/egmap_formal_*_split.json`）
-- **MASPO**：官方优化出的 `maspo_formal_*_prompts.json` + 单路推理
-- **EGMAP**：EGMAP 优化出的 prompts/handoffs + bank + 全套 ExHandoff 推理栈
+> 最后更新：2026-06-17  
+> 面向：**新服务器从零复现实验** · 协议见 [METHOD.md](METHOD.md) · 数字台账 [RESULT.md](RESULT.md) · 操作细节 [RUN.md](RUN.md)
 
 ---
 
-## 2. 环境与数据
+## 0. 读本文能做什么
 
-### 2.1 两套模型配置（分开跑，不混用 tag）
+| 你想… | 跳转到 |
+|--------|--------|
+| 在新机器上从零跑通 8 数据集 | **§5 标准流水线** |
+| 理解 MASPO / EGMAP 区别与顺序 | **§1、§6** |
+| 保证论文数字公平可比 | **§7 公平协议** |
+| 单格重跑 / 补 MASPO 缺题 | **§8** |
+| 查当前 seed123 进度与数字 | **§11** |
 
-| Profile | 名称 | Work | Strong | 端口 | 后缀 | 何时跑 |
-|---------|------|------|--------|------|------|--------|
-| **`m4b`** | Single 4B（**先跑，1×GPU**） | 4B | 4B | :8005 | `_m4b` | **Campaign 1** |
-| **`m4b9b`** | Dual 4B+9B（论文主设置，需 2×GPU 或足够显存） | 4B | 9B | :8005/:8004 | `_m4b9b` | 有双卡时 |
-| **`m9b`** | Single 9B | 9B | 9B | :8001 | `_m9b` | **Campaign 2（后跑）** |
-
-```bash
-# Campaign 1 — 小模型 4B（单卡默认）
-bash /mnt/afs/L202500372/bootstrap/serve-qwen35.sh 4b --port 8005
-MODEL_PROFILE=single_4b bash scripts/run_maspo_official_phase1.sh
-
-# Campaign 2 — 大模型 9B（单独一轮，不覆盖 Campaign 1 产物）
-bash /mnt/afs/L202500372/bootstrap/serve-qwen35.sh 9b --port 8001
-MODEL_PROFILE=single_9b bash scripts/run_maspo_official_phase1.sh
-
-# 可选：双卡论文配置 Dual
-bash scripts/start_vllm_dual_4b9b.sh
-MODEL_PROFILE=dual_4b_9b bash scripts/run_maspo_official_phase1.sh
-```
-
-- 产物示例：`result/maspo_formal_math500_..._seed123_m4b9b.json` vs `..._m9b.json`
-- **prompt / bank / eval 按 profile 独立**；`splits/egmap_formal_*_split.json`（无后缀）各数据集共享
-- 每格跑完 → `scripts/update_result_ledger.py`（台账含 **Model** 列）
-
-```bash
-export HANDOFF_DATASET_ROOT=/mnt/afs/L202500372/data/egmap_handoff
-```
-| 图拓扑 | `llm_agg`（并行聚合，主表） |
-| Agent 数 | `na=3` |
-| Reflect 变体 | `nr=2`（单独一行，未跑完前不进主表） |
-| 随机种子 | `123`, `42`, `456` |
-| Opt 池 | `opt_size=100`（与 eval 不交） |
-| Eval 子集 | `sample_size=200`（从 eval pool 按 seed 抽样） |
-| 优化深度 | `depth=3`, `rounds_per_turn=3` |
-| Bank | `bank_size=100`, `top_k=3`（仅 EGMAP） |
-
-### 防截断（math / 文本正式格必开）
-
-```bash
-source scripts/formal_apply_tok8192_env.sh   # MASPO_WORK_MAX_TOKENS=8192, MASPO_WORK_MAX_PROMPT_CHARS=0
-```
+**铁律**：论文主表只用带 `fair_eval.policy` 的 `result/*.json`；MASPO 必须先于 EGMAP 锁定；**禁止**使用含 `handoff`/`residual_selector` 的旧 `maspo_formal_*.json`。
 
 ---
 
-## 3. 数据集矩阵
+## 1. 两条协议（Baseline vs Ours）
 
-### 3.1 主表（Parallel `llm_agg`, `na=3`, `nr=1`）
+| 维度 | **官方 MASPO** | **EGMAP** |
+|------|----------------|-----------|
+| 入口 | `run_maspo_formal_one_seed.py` | `run_egmap_formal_one_seed.py` |
+| Prompt | 仅 **节点 prompt** optimize | 节点 prompt + **handoff** optimize |
+| 推理 | 单路 `MAS.arun()` | handoff + disagreement + residual + **experience 检索** |
+| Handoff | ❌ | `prompt/egmap_formal_*_handoffs.json` |
+| Bank | ❌ | `memory/egmap_formal_*_bank.jsonl`（仅 opt 错题写入） |
+| 结果文件 | `maspo_formal_{ds}_..._{profile}.json` | `egmap_formal_{ds}_..._b100k3_{profile}.json` |
 
-| 域 | 数据集 | EGMAP×3 seeds | 官方 MASPO×3 seeds | 备注 |
-|----|--------|:-------------:|:------------------:|------|
-| Math | math500 | ❌ **需重跑**（3 seeds） | ❌ **需重跑**（3 seeds） | s123 bank=0；MASPO 为伪 baseline；建议 tok8192 全重跑 |
-| Math | aqua | ✅ | ❌ **需重跑** | |
-| Reasoning | gpqa | ✅（截断严重，建议重跑 EGMAP） | ❌ **需重跑** | tok8192 优先 |
-| Reasoning | agieval | ✅（建议重跑） | ❌ **需重跑** | |
-| Code | humaneval | seed123 ✅ | ❌ **需重跑** | seed42/456 缺 |
-| VQA | vqarad / slake / chartqa | stage1 only | ❌ 全缺 | 无正式 eval json |
-
-### 3.2 变体（不进主表直至 parallel 收敛）
-
-- `graph=reflect`, `nr=2`
-- 其他拓扑（`chain`, `debate` 等）
+固定超参（主表）：`graph=llm_agg`, `na=3`, `nr=1`, `opt_size=100`, `sample_size=200`, `depth=3`, `bank_size=100`, `top_k=3`, seeds `123/42/456`。
 
 ---
 
-## 4. 运行命令
+## 2. 新服务器部署清单
 
-### 4.1 官方 MASPO（单 seed，优化 + eval）
+按顺序打勾，**全部通过后再跑正式实验**。
+
+### 2.1 代码与 Python
 
 ```bash
-cd /mnt/afs/L202500372/Experience-Guided-Multi-Agent-Prompting
-source scripts/formal_apply_tok8192_env.sh
+git clone <your-EGMAP-repo-url>
+cd Experience-Guided-Multi-Agent-Prompting   # 或你的克隆目录
+export EGMAP_ROOT="$(pwd)"
 
-python run_maspo_formal_one_seed.py \
-  --dataset math500 --graph llm_agg --na 3 --nr 1 \
-  --seed 123 --opt-size 100 --sample-size 200 --depth 3
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
 ```
 
-- 产出：`prompt/maspo_formal_*_prompts.json`、`result/maspo_formal_*.json`
-- **不会**写 handoffs、bank、residual 字段
-
-仅重跑 eval（已有 MASPO prompts）：
+### 2.2 存储路径（按机器改）
 
 ```bash
-python run_maspo_formal_one_seed.py --dataset math500 --seed 123 --skip-optimize
-# 或
-python run_maspo_formal_baseline.py --dataset math500 --seed 123
+export AFS_HOME=/path/to/storage          # 例：/mnt/afs/L202500372
+export HANDOFF_DATASET_ROOT="${AFS_HOME}/data/egmap_handoff"
 ```
 
-### 4.2 EGMAP（单 seed，三阶段）
+需存在：各 benchmark 的 handoff 数据（与现网 `egmap_handoff` 布局一致）。
+
+### 2.3 模型权重
+
+| Profile | 变量名 | 路径示例 |
+|---------|--------|----------|
+| m4b | `Qwen3.5-4B` | `${AFS_HOME}/models/Qwen3.5-4B` |
+| m9b | `Qwen3.5-9B` | `${AFS_HOME}/models/Qwen3.5-9B` |
+| m4b9b | 4B + 9B 各一份 | work :8005，strong :8004 |
+
+### 2.4 vLLM 环境
+
+需已安装 vLLM（本仓库常用 `/tmp/vllm-cu124` 或 `bootstrap` 脚本配套环境）。  
+**文本阶段**可用 `--language-model-only`；**VQA 必须多模态**（见 §4）。
+
+### 2.5 就绪探测
 
 ```bash
-python run_egmap_formal_one_seed.py \
-  --dataset math500 --graph llm_agg --na 3 --nr 1 \
-  --seed 123 --opt-size 100 --sample-size 200 --depth 3 \
-  --bank-size 100 --top-k 3
+cd "${EGMAP_ROOT}"
+source scripts/formal_model_profiles.sh
+formal_apply_model_profile single_4b    # 或 single_9b / dual_4b_9b
+formal_check_vllm_profile             # 应通过
+curl -sf http://127.0.0.1:8005/v1/models && echo OK
 ```
 
-阶段：
-
-1. **Optimize**：structured meta + handoff optimize → `prompt/egmap_formal_*_{prompts,handoffs}.json`
-2. **Stage1 bank build**：仅在 opt 100 题上跑，写错题 → `memory/egmap_formal_*_bank.jsonl`
-3. **Frozen eval**：固定 bank，在 eval 200 题上推理 → `result/egmap_formal_*.json`
-
-跳过优化（仅 stage1+2）：
+### 2.6 可选：EGMAP 预检（建议每数据集正式跑前）
 
 ```bash
-python run_egmap_formal_one_seed.py --dataset math500 --seed 123 --skip-optimize
-```
-
-### 4.3 等价 CLI（`run_maspo.py`）
-
-**官方 MASPO**（无 ExHandoff）：
-
-```bash
-python run_maspo.py --dataset math500 --graph llm_agg --na 3 \
-  --disjoint-eval --opt-size 100 --sample-size 200 --seed 123 \
-  --optimize --fixed-rounds --beam-refresh --misleading-sampling --lookahead-score \
-  --depth 3
-# 不要加：--experience-guided --handoff --disagreement-handoff --residual-selector
-```
-
-**EGMAP 全套**：
-
-```bash
-python run_maspo.py --dataset math500 --graph llm_agg --na 3 \
-  --disjoint-eval --opt-size 100 --sample-size 200 --seed 123 \
-  --optimize --fixed-rounds --beam-refresh --misleading-sampling --lookahead-score \
-  --experience-guided --handoff --handoff-optimize --structured-meta-prompt \
-  --disagreement-handoff --residual-selector \
-  --experience-bank memory/... --experience-top-k 3 --write-experience
-```
-
-### 4.4 批量重跑脚本
-
-| 脚本 | 用途 |
-|------|------|
-| `scripts/rerun_textmath_tok8192.sh` | math500 / aqua / gpqa / agieval EGMAP+MASPO |
-| `scripts/rerun_humaneval_tok8192.sh` | humaneval |
-| `scripts/run_smoke_bank_gpu.sh` | bank 构建 smoke（独占 GPU） |
-| `scripts/prune_unscoreable_formal.py` | 剔除不可评分题，重算 accuracy |
-
-重跑官方 MASPO 全矩阵（示例）：
-
-```bash
-for ds in math500 aqua gpqa agieval humaneval; do
-  for seed in 123 42 456; do
-    python run_maspo_formal_one_seed.py --dataset "$ds" --seed "$seed" \
-      2>&1 | tee "logs/maspo_official_${ds}_seed${seed}.log"
-  done
-done
-```
-
----
-
-## 5. 产物与命名
-
-| 类型 | 路径模式 |
-|------|----------|
-| EGMAP split | `splits/egmap_formal_{ds}_llm_agg_na3_d3s200o100seed{S}_b100k3_split.json` |
-| MASPO prompts | `prompt/maspo_formal_{ds}_llm_agg_na3_d3s200o100seed{S}_prompts.json` |
-| EGMAP prompts / handoffs | `prompt/egmap_formal_*_{prompts,handoffs}.json` |
-| EGMAP bank | `memory/egmap_formal_*_bank.jsonl` |
-| MASPO eval（有效） | `result/maspo_formal_{ds}_...seed{S}.json`，`split_info.handoff=false` |
-| EGMAP eval | `result/egmap_formal_{ds}_...seed{S}_b100k3.json` |
-
-导出对照表（**仅在新 MASPO 跑完后**）：
-
-```bash
-python scripts/export_egmap_maspo_table.py --auto -o result/comparison_table.md
-```
-
----
-
-## 6. 质量门禁（跑前 / 跑后）
-
-### 跑前
-
-- [ ] vLLM 就绪：`curl -s http://127.0.0.1:8001/v1/models`
-- [ ] 无其他任务抢占 `:8001`（humaneval 与 bank smoke 互斥）
-- [ ] 文本/math 格已 `formal_apply_tok8192_env`
-- [ ] MASPO 脚本 **未** 读取 `egmap_formal_*_handoffs.json`
-
-### 跑后
-
-- [ ] MASPO json 中 `handoff=false`, `residual_selector=false`, `disagreement_handoff=false`
-- [ ] EGMAP bank 仅含 opt 错题；`verify_bank_from_opt_only` 通过
-- [ ] `prune_unscoreable_formal.py` 已执行（formal 结果）
-- [ ] 三 seed 齐全再报均值 ± std
-
----
-
-## 7. 分阶段执行计划（当前策略）
-
-**原则：先单 seed 打通全数据集，MASPO baseline 跑完即锁定数值；再跑 EGMAP 对照；最后扩 3 seeds。**
-
-### Phase 1 — 官方 MASPO × seed=123 × 全主表（**Campaign A: m4b9b 先跑**）
-
-| 顺序 | 数据集 | Profile | 动作 |
-|:----:|--------|---------|------|
-| 1–8 | 全主表 | **m4b9b** | `MODEL_PROFILE=dual_4b_9b bash scripts/run_maspo_official_phase1.sh` |
-| 1–8 | 全主表 | m9b（后） | `MODEL_PROFILE=single_9b bash scripts/run_maspo_official_phase1.sh` |
-
-> 当前后台若在用 single 9B @:8001 跑 math500，应停掉后改用 **dual m4b9b** 重跑（产物 tag 不同，不冲突）。
-
-```bash
-bash scripts/run_maspo_official_phase1.sh          # 8 数据集串行
-DATASETS=math500 bash scripts/run_maspo_official_phase1.sh   # 单格调试
-FORCE=1 bash scripts/run_maspo_official_phase1.sh  # 覆盖旧伪-MASPO json
-```
-
-跑完每格 → `scripts/update_result_ledger.py` 写入 [RESULT.md](RESULT.md) **运行台账**。  
-**MASPO 锁定条件**：`protocol_ok=yes`（无 handoff/residual）；**锁定后不改 protocol**。
-
-旧无效 json 自动归档到 `result/_invalid_pseudo_maspo/`。
-
-### Phase 1.5 — EGMAP 预检门禁（Phase 2 前必过）
-
-每数据集在正式 EGMAP 跑之前执行：
-
-```bash
-# 静态：handoff 边覆盖、split/bank 隔离、bank schema
 .venv/bin/python scripts/preflight_egmap.py --dataset math500 --seed 123
-
-# GPU：bank 构建 smoke（tok8192，fast 约 3min；full 含 residual 更慢）
-source scripts/formal_common.sh && formal_apply_env ... && formal_apply_tok8192_env
 .venv/bin/python scripts/preflight_egmap.py --dataset math500 --seed 123 --smoke --fast
 ```
 
-| 检查项 | 说明 |
-|--------|------|
-| handoff 边覆盖 | 每条 MAS 边有 sender/receiver 契约 |
-| bank 隔离 | `unique_id` 仅来自 opt 100 |
-| bank schema | 仅错题；`correct=True` 行视为 FAIL |
-| smoke | opt 子集可写 bank、无大面积 timeout |
-| post-eval | result 含 `residual` + `experience` + `raw_trace` |
+---
 
-当前静态预检（seed123）：math500/aqua/gpqa/humaneval **PASS**；**agieval bank 第 15 行含 correct=True，Phase 2 需 FORCE 重建 bank**。
+## 3. 模型 Profile 与产物后缀
 
-### Phase 2 — EGMAP × seed=123 × 全主表（MASPO 锁定 + 预检通过后）
+| Profile | 命令 | Work | Strong | 端口 | 后缀 |
+|---------|------|------|--------|------|------|
+| **m4b** | `MODEL_PROFILE=single_4b` | 4B | 4B | :8005 | `_m4b` |
+| **m9b** | `MODEL_PROFILE=single_9b` | 9B | 9B | :8001 | `_m9b` |
+| **m4b9b** | `MODEL_PROFILE=dual_4b_9b` | 4B | 9B | :8005/:8004 | `_m4b9b` |
+
+**不同 profile 的 prompt / bank / result 互不覆盖**；`splits/egmap_formal_*_split.json` 按数据集+seed 共享（无 profile 后缀）。
+
+防截断（文本/math **必开**，脚本内已 `source`）：
 
 ```bash
-bash scripts/run_egmap_official_phase2a.sh
-DATASETS=math500 bash scripts/run_egmap_official_phase2a.sh
+# 等价于 MASPO_WORK_MAX_TOKENS=8192, MASPO_WORK_MAX_PROMPT_CHARS=0
+source scripts/formal_model_profiles.sh && formal_apply_tok8192_env
 ```
-
-每格完成后：`preflight --check-eval` + `update_result_ledger.py` 更新台账。
-
-### Phase 3 — 扩 seeds 42 / 456
-
-先 MASPO 全矩阵（24 格），再 EGMAP 全矩阵；三 seed mean±std 进论文主表。
-
-### Phase 4 — 扩展
-
-- reflect `nr=2`
-- ablation（去 bank / residual / disagreement）
-
-### 旧优先级备忘
-
-| 项 | 说明 |
-|----|------|
-| 全部伪 `maspo_formal_*` | Phase 1 覆盖重跑 |
-| math500 EGMAP s123 bank | Phase 2 重建 |
-| gpqa/agieval EGMAP tok8192 | Phase 2 一并重跑 |
 
 ---
 
-## 8. 论文表结构（目标）
+## 4. 启动 vLLM（文本 vs VQA）
 
-主表列：**Dataset | MASPO (official) | EGMAP (Ours) | Δ**  
-行：上表 5+3 个数据集 × 3-seed mean±std（或 median）。
+### 4.1 文本 5 集（math500 … humaneval）
 
-副表：
+```bash
+# 标准 4B 文本服务（language-model-only 可接受）
+bash "${AFS_HOME}/bootstrap/serve-qwen35.sh" 4b --port 8005
+```
 
-- Ablation：去 bank / 去 residual / 去 disagreement
-- Bank 规模与 top-k 敏感性
-- Opt 池大小（100 vs 50）
+### 4.2 VQA 3 集（vqarad / slake / chartqa）
 
-详细数字与审计见 [RESULT.md](RESULT.md)；方法定义见 [METHOD.md](METHOD.md)。
+**必须多模态**，否则报 `At most 0 image(s) may be provided` 且结果无效：
+
+```bash
+cd "${EGMAP_ROOT}"
+bash scripts/restart_vllm_4b_multimodal.sh
+# 脚本含：--enforce-eager --gdn-prefill-backend triton --gpu-memory-utilization 0.68
+```
+
+跑 VQA 实验时：
+
+```bash
+export RUN_VQA=1
+```
+
+### 4.3 切换文本 ↔ VQA
+
+同一端口 `:8005` 上 **文本与多模态互斥**，换阶段需重启 vLLM：
+
+1. 跑完文本 → `restart_vllm_4b_multimodal.sh`
+2. 跑完 VQA → 若还要跑文本，再 `serve-qwen35.sh 4b --port 8005`
+
+### 4.4 勿用错误 baseline 的环境
+
+- ❌ 用 **text-only** vLLM 跑 VQA  
+- ❌ 不设 `RUN_VQA=1` 跑 VQA（脚本会 skip）  
+- ❌ 混用无 `_m4b` 后缀的旧 json 与新版 official MASPO
+
+---
+
+## 5. 标准流水线（新服务器推荐）
+
+### 5.1 总览
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  Phase A：文本 5 集  (RUN_VQA=0, 文本 vLLM @ :8005)          │
+│    run_m4b_text.sh                                          │
+│    → MASPO ×5 → EGMAP ×5 → fair_all_pairs → ledger          │
+├─────────────────────────────────────────────────────────────┤
+│  切换 vLLM → 多模态 4B                                       │
+├─────────────────────────────────────────────────────────────┤
+│  Phase B：VQA 3 集  (RUN_VQA=1)                              │
+│    run_m4b_vqa.sh                                           │
+│    → MASPO ×3 → EGMAP ×3 → fair_all_pairs → ledger          │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**顺序原因**：必须先 **MASPO** 再 **EGMAP**（baseline 锁定）；每对完成后做 **fair**（§7）。EGMAP 每格内部顺序见 §6。
+
+### 5.2 Phase A — 文本（一键）
+
+```bash
+cd "${EGMAP_ROOT}"
+export AFS_HOME=/path/to/storage
+export MODEL_PROFILE=single_4b
+export SEED=123
+
+# 确认文本 vLLM
+curl -sf http://127.0.0.1:8005/v1/models || bash "${AFS_HOME}/bootstrap/serve-qwen35.sh" 4b --port 8005
+
+nohup bash scripts/run_m4b_text.sh >> logs/campaign_m4b_text.nohup 2>&1 &
+tail -f logs/campaign_m4b_text.log
+```
+
+`run_m4b_text.sh` 内部：
+
+| 步骤 | 脚本 | 数据集 |
+|------|------|--------|
+| 1 | `run_maspo_official_phase1.sh` | math500 aqua gpqa agieval humaneval |
+| 2 | `run_egmap_official_phase2a.sh` | 同上 |
+| 3 | `RERUN_MASPO=1 fair_all_pairs.sh` | 补 MASPO 缺题 + 公平后处理 |
+| 4 | `update_result_ledger.py` | 写 RESULT.md |
+
+已有合法 `_m4b` json 的格会 **skip**；强制重跑：`FORCE=1`。
+
+### 5.3 Phase B — VQA（一键）
+
+```bash
+cd "${EGMAP_ROOT}"
+bash scripts/restart_vllm_4b_multimodal.sh    # 等 API ready
+
+export RUN_VQA=1
+export MODEL_PROFILE=single_4b
+export SEED=123
+# 可选加速：export MAX_CONCURRENT=12 EGMAP_MAX_CONCURRENT=8
+
+nohup bash scripts/run_m4b_vqa.sh >> logs/campaign_m4b_vqa.nohup 2>&1 &
+tail -f logs/campaign_m4b_vqa.log
+```
+
+监控（可选）：`bash scripts/monitor_vqa_campaign.sh` 或 `tail -f logs/vqa_monitor.log`。
+
+### 5.4 扩 seed / 换 profile
+
+```bash
+# seed 42 文本
+export SEED=42 MODEL_PROFILE=single_4b
+bash scripts/run_m4b_text.sh
+
+# seed 42 VQA（记得 RUN_VQA=1 + 多模态 vLLM）
+export SEED=42 RUN_VQA=1
+bash scripts/run_m4b_vqa.sh
+
+# 9B 单机（端口 :8001）
+export MODEL_PROFILE=single_9b
+bash scripts/run_campaign_m9b.sh   # 见 RUN.md
+```
+
+### 5.5 脚本索引（按用途）
+
+| 脚本 | 何时用 |
+|------|--------|
+| **`scripts/run_m4b_text.sh`** | **新服：文本 5 集全流程（推荐）** |
+| **`scripts/run_m4b_vqa.sh`** | **新服：VQA 3 集全流程（推荐）** |
+| `scripts/run_maspo_official_phase1.sh` | 仅 MASPO；可 `DATASETS=gpqa` |
+| `scripts/run_egmap_official_phase2a.sh` | 仅 EGMAP；MASPO 完成后 |
+| `scripts/fair_all_pairs.sh` | 批量公平后处理；`RERUN_MASPO=1` 补题 |
+| `scripts/rerun_maspo_fair_eval.sh` | 单/多集 MASPO `--skip-optimize` 补 manifest |
+| `scripts/fair_pair_postprocess.py` | 单对 fair `--write` |
+| `scripts/update_result_ledger.py` | 更新 RESULT.md |
+| `scripts/preflight_egmap.py` | 跑前/跑后 EGMAP 门禁 |
+| `scripts/export_egmap_maspo_table.py` | 导出 comparison 表（fair 后） |
+| `scripts/restart_vllm_4b_multimodal.sh` | VQA 前启多模态 vLLM |
+
+**不要**用仅 `prune_unscoreable_formal.py` 代替 fair；prune 是 fair 流程的子步骤之一。
+
+---
+
+## 6. EGMAP 单格内部三阶段
+
+每格 `run_egmap_formal_one_seed.py`（`skip_optimize=False` 时）：
+
+```
+① Optimize（opt 100 题）
+   ├─ 节点 prompt（depth=3, beam-refresh…）
+   └─ handoff 契约优化 → prompts.json + handoffs.json
+        ↓
+② Stage1 建 bank（仍 opt 100 题，write_experience=True）
+   └─ memory/*_bank.jsonl
+        ↓
+③ Stage2 frozen eval（manifest eval 题，write_experience=False）
+   └─ result/egmap_formal_*_{profile}.json
+```
+
+MASPO 只有「节点 prompt optimize + eval」，**无 handoff、无 bank**。
+
+`--skip-optimize`：跳过 ①，加载已有 prompts/handoffs，直接从 ②③ 开始（重跑 eval / 重建 bank 时用）。
+
+---
+
+## 7. 公平对比协议（论文主表必做）
+
+### 7.1 原则
+
+对每一对 `(dataset, seed, profile)`：
+
+1. **同题集**：共用 `splits/egmap_formal_*_split.json` 的 `eval_unique_ids_run`
+2. **同评分**：`rescore_formal_clean` 双边重算
+3. **同分母**：**union** 剔除两边均不可自动评分的题（截断等），两边都删
+
+### 7.2 命令
+
+```bash
+cd "${EGMAP_ROOT}"
+
+# 单对
+.venv/bin/python scripts/fair_pair_postprocess.py \
+  --dataset math500 --seed 123 --model-suffix m4b --write
+
+# 批量（MASPO 若缺 manifest 题，先补跑）
+export SEED=123 MODEL_SUFFIX=m4b
+export DATASETS="math500 aqua gpqa agieval humaneval"   # 或含 VQA
+RERUN_MASPO=1 bash scripts/fair_all_pairs.sh
+
+.venv/bin/python scripts/update_result_ledger.py --seed 123 --graph llm_agg
+```
+
+### 7.3 如何确认已 fair
+
+```bash
+.venv/bin/python -c "
+import json; d=json.load(open('result/maspo_formal_math500_llm_agg_na3_d3s200o100seed123_m4b.json'))
+print(d.get('fair_eval',{}).get('policy'))
+"
+# 应输出: manifest_sync + rescore + union_unscoreable_prune
+```
+
+### 7.4 常见不公平来源（务必避免）
+
+| 问题 | 处理 |
+|------|------|
+| MASPO eval 题数 < manifest | `bash scripts/rerun_maspo_fair_eval.sh <ds>` 或 `RERUN_MASPO=1 fair_all_pairs.sh` |
+| 用旧伪 MASPO（含 handoff） | 脚本自动归档到 `result/_invalid_pseudo_maspo/`；`FORCE=1` 重跑 |
+| 只 prune 不做 pair sync | 必须 `fair_pair_postprocess.py --write` |
+| VQA 用 text-only vLLM | 重跑；旧 json 作废 |
+| 论文引 raw 分母 | 只引 `fair_eval` 后 `graph_types.llm_agg` |
+
+### 7.5 fair n 说明
+
+`fair n` ≤ manifest n 因数据集规模与 union 剔除（见 §11 脚注）。**公平性靠同题同分母，不靠把 n 撑大**；gpqa/humaneval 的 n 偏小是协议 `eval_run=min(200,|D|-100)` 所致，正文脚注即可。
+
+---
+
+## 8. 单格调试与补跑
+
+```bash
+cd "${EGMAP_ROOT}"
+source scripts/formal_model_profiles.sh
+formal_apply_model_profile single_4b
+formal_apply_tok8192_env
+export HANDOFF_DATASET_ROOT=...
+
+# 官方 MASPO 整格（optimize + eval）
+.venv/bin/python run_maspo_formal_one_seed.py \
+  --dataset gpqa --graph llm_agg --na 3 --seed 123 \
+  --opt-size 100 --sample-size 200 --depth 3 --max-concurrent 12
+
+# MASPO 仅 eval（已有 prompts）
+.venv/bin/python run_maspo_formal_one_seed.py --dataset gpqa --seed 123 --skip-optimize
+
+# EGMAP 整格
+.venv/bin/python run_egmap_formal_one_seed.py \
+  --dataset gpqa --graph llm_agg --na 3 --seed 123 \
+  --opt-size 100 --sample-size 200 --depth 3 \
+  --bank-size 100 --top-k 3 --max-concurrent 8
+
+# EGMAP 仅 bank + eval（已有 prompts/handoffs）
+.venv/bin/python run_egmap_formal_one_seed.py --dataset gpqa --seed 123 --skip-optimize
+
+# VQA 单格：先 export RUN_VQA=1 + 多模态 vLLM
+```
+
+强制覆盖已有结果：`FORCE=1 bash scripts/run_maspo_official_phase1.sh`（或 phase2a）。
+
+---
+
+## 9. 跑前 / 跑后门禁
+
+### 跑前
+
+- [ ] `curl -s http://127.0.0.1:<port>/v1/models` 成功
+- [ ] VQA：`RUN_VQA=1` 且 vLLM **无** `--language-model-only`
+- [ ] `HANDOFF_DATASET_ROOT` 指向正确数据
+- [ ] 文本/math 已 tok8192（正式脚本默认已设）
+- [ ] GPU 独占（避免多实验抢同一 vLLM）
+
+### 跑后（每格或每对）
+
+- [ ] MASPO json：`split_info` 无 handoff / residual（或 `protocol_ok`）
+- [ ] EGMAP：`verify_bank_from_opt_only` 通过（preflight 可验）
+- [ ] 双边 json 齐全 → `fair_pair_postprocess.py --write`
+- [ ] `fair_eval.policy` 存在 → `update_result_ledger.py`
+- [ ] 三 seed 齐再报 mean±std
+
+---
+
+## 10. 产物命名
+
+| 类型 | 路径 |
+|------|------|
+| Split manifest | `splits/egmap_formal_{ds}_llm_agg_na3_d3s200o100seed{S}_b100k3_split.json` |
+| MASPO prompts | `prompt/maspo_formal_{ds}_..._seed{S}_m4b_prompts.json` |
+| EGMAP prompts / handoffs | `prompt/egmap_formal_*_{prompts,handoffs}.json` |
+| EGMAP bank | `memory/egmap_formal_*_b100k3_m4b_bank.jsonl` |
+| MASPO eval | `result/maspo_formal_{ds}_..._seed{S}_m4b.json` |
+| EGMAP eval | `result/egmap_formal_{ds}_..._b100k3_m4b.json` |
+| 日志 | `logs/{maspo,egmap}_formal_{ds}_..._m4b_official.log` |
+| Fair 日志 | `logs/fair_{ds}_seed{S}_m4b.log` |
+
+---
+
+## 11. 当前进度与结果（m4b · seed123）
+
+> 更新于 2026-06-17；详情见 [RESULT.md](RESULT.md)
+
+### 11.1 流水线状态
+
+| 阶段 | 状态 |
+|------|------|
+| Phase A 文本：MASPO + EGMAP + fair | ✅ 完成 |
+| Phase B VQA：MASPO | ✅ 3/3（raw，待 fair） |
+| Phase B VQA：EGMAP | 🔄 vqarad optimize 中 |
+| Phase B VQA：fair | ❌ 待 EGMAP 完成 |
+
+### 11.2 文本 5 集 — 公平主表（可写论文）
+
+| 数据集 | manifest | fair n | MASPO | EGMAP | Δ |
+|--------|:--------:|:------:|:-----:|:-----:|--:|
+| math500 | 200 | 196 | 85.7% | 85.2% | −0.5 |
+| aqua | 154 | 154 | 89.6% | 92.2% | +2.6 |
+| gpqa | 98 | 94 | 71.3% | 75.5% | +4.3 |
+| agieval | 156 | 151 | 84.1% | 88.7% | +4.6 |
+| humaneval | 64 | 63 | 84.1% | 93.7% | +9.5 |
+| **Macro（5 集等权）** | | | **83.0%** | **87.1%** | **+4.1** |
+
+### 11.3 VQA 3 集 — 进行中（raw，未 fair）
+
+| 数据集 | MASPO (raw) | EGMAP | Fair |
+|--------|:-----------:|:-----:|:----:|
+| vqarad | 123/200=61.5% | 进行中 | ❌ |
+| slake | 126/200=63.0% | 排队 | ❌ |
+| chartqa | 160/200=80.0% | 排队 | ❌ |
+
+### 11.4 每集 eval 上限（协议）
+
+| 数据集 | \|D\| | eval_run 上限 |
+|--------|------:|:-------------:|
+| math500 | 500 | 200 |
+| aqua | 254 | 154 |
+| gpqa | 198 | 98 |
+| agieval | 256* | 156 |
+| humaneval | 164 | 64 |
+| vqarad / slake / chartqa | 451 / 1061 / 2500 | 200 |
+
+\*agieval 以 `load_test_data` 为准；公式 `eval_run = min(200, |D|-100)`。
+
+---
+
+## 12. 后续待跑（优先级）
+
+| 优先级 | 任务 | 命令要点 |
+|:------:|------|----------|
+| P0 | VQA EGMAP + fair | 等当前 `run_m4b_vqa.sh` 跑完；或手动 phase2a + `fair_all_pairs.sh` |
+| P1 | m4b seed 42/456 | `SEED=42 bash scripts/run_m4b_text.sh` + `RUN_VQA=1 bash scripts/run_m4b_vqa.sh` |
+| P2 | m4b9b / m9b 全矩阵 | `dual_4b_9b` / `single_9b` + 对应 vLLM |
+| P3 | reflect `nr=2`、ablation | 副表；不进主表 |
+
+---
+
+## 13. 常见故障
+
+| 现象 | 原因 | 处理 |
+|------|------|------|
+| VQA skip / 0 image | text-only vLLM 或 `RUN_VQA=0` | `restart_vllm_4b_multimodal.sh` + `RUN_VQA=1` |
+| vLLM OOM | `gpu-memory-utilization` 过高 | multimodal 脚本已设 0.68；降 `MAX_CONCURRENT` |
+| vLLM 启动极慢 | GDN JIT 编译 | 用 `restart_vllm_4b_multimodal.sh`（enforce-eager + triton） |
+| MASPO fair 报缺题 | manifest 未满 | `rerun_maspo_fair_eval.sh` |
+| EGMAP bank 含 eval 题 | 泄露 | `preflight_egmap.py`；重建 bank |
+| 数字与 MASPO 不可比 | 未 fair / 伪 baseline | §7 |
+
+---
+
+## 14. 论文表目标
+
+主表列：**Dataset | MASPO (official) | EGMAP | Δ**  
+行：8 benchmark × 3-seed mean±std（当前仅 seed123 fair 可填文本 5 行）。
+
+导出（fair 完成后）：
+
+```bash
+.venv/bin/python scripts/export_egmap_maspo_table.py --auto -o result/comparison_table.md
+```
+
+---
+
+*维护：实验协议变更时同步更新 §5–§7；结果数字以 `fair_eval.policy` 存在的 json 为准。*

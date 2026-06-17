@@ -27,6 +27,9 @@ SAMPLE_SIZE="${SAMPLE_SIZE:-200}"
 MAX_CONCURRENT="${MAX_CONCURRENT:-16}"
 FORCE="${FORCE:-0}"
 
+BANK_SIZE="${BANK_SIZE:-100}"
+TOP_K="${TOP_K:-3}"
+
 PY="${PY:-.venv/bin/python}"
 mkdir -p logs result prompt result/_invalid_pseudo_maspo
 
@@ -42,6 +45,9 @@ echo "[MASPO-P1] seed=${SEED} datasets=[${DATASETS}] tok8192 official baseline"
 echo "[MASPO-P1] WORK_MAX_TOKENS=${MASPO_WORK_MAX_TOKENS} PROMPT_CHARS=${MASPO_WORK_MAX_PROMPT_CHARS}"
 
 for dataset in ${DATASETS}; do
+  if formal_skip_vqa_unless_enabled "${dataset}"; then
+    continue
+  fi
   tag="maspo_formal_${dataset}_${GRAPH}_na${NA}_d${DEPTH}s${SAMPLE_SIZE}o${OPT_SIZE}seed${SEED}${FORMAL_TAG_SUFFIX}"
   out="result/${tag}.json"
   log="logs/${tag}_official.log"
@@ -78,8 +84,15 @@ sys.exit(1 if bad else 0)
     --depth "${DEPTH}" \
     --max-concurrent "${MAX_CONCURRENT}" \
     > "${log}" 2>&1; then
-  acc=$("${PY}" -c "import json; d=json.load(open('${out}')); print(d['graph_types']['llm_agg']['accuracy'])" 2>/dev/null || echo "?")
+    acc=$("${PY}" -c "import json; d=json.load(open('${out}')); print(d['graph_types']['llm_agg']['accuracy'])" 2>/dev/null || echo "?")
     echo "[$(date '+%F %T')] [done] ${out} acc=${acc}"
+    eg="result/egmap_formal_${dataset}_${GRAPH}_na${NA}_d${DEPTH}s${SAMPLE_SIZE}o${OPT_SIZE}seed${SEED}_b${BANK_SIZE}k${TOP_K}${FORMAL_TAG_SUFFIX}.json"
+    if [[ -f "${eg}" ]]; then
+      echo "[fair] MASPO+EGMAP ${dataset} seed=${SEED}"
+      "${PY}" scripts/fair_pair_postprocess.py --dataset "${dataset}" --seed "${SEED}" \
+        --model-suffix "${FORMAL_MODEL_PROFILE}" --write \
+        >> "logs/fair_${dataset}_seed${SEED}${FORMAL_TAG_SUFFIX}.log" 2>&1 || true
+    fi
     "${PY}" scripts/update_result_ledger.py --seed "${SEED}" --graph "${GRAPH}" || true
   else
     echo "[$(date '+%F %T')] [FAIL] ${dataset} seed=${SEED} (see ${log})" >&2

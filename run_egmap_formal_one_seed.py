@@ -28,6 +28,18 @@ from run_maspo import arun_test_suite
 from experience import ExperienceMemoryBank, finalize_experience_bank
 from formal_tags import with_model_suffix, strip_model_suffix
 
+_VQA_DATASETS = frozenset({"vqarad", "slake", "chartqa", "textvqa", "pmcvqa"})
+
+
+def _maybe_skip_vqa(dataset: str) -> None:
+    if dataset in _VQA_DATASETS and os.environ.get("RUN_VQA", "0") != "1":
+        print(
+            f"[SKIP] VQA dataset={dataset} — text-first mode; "
+            "deploy multimodal vLLM then RUN_VQA=1",
+            flush=True,
+        )
+        raise SystemExit(0)
+
 
 async def main():
     parser = argparse.ArgumentParser()
@@ -49,7 +61,13 @@ async def main():
         action="store_true",
         help="Load saved prompt/handoff JSON and run stage1+stage2 only",
     )
+    parser.add_argument(
+        "--no-bank",
+        action="store_true",
+        help="Skip experience bank build and eval without retrieval (ablation)",
+    )
     args = parser.parse_args()
+    _maybe_skip_vqa(args.dataset)
 
     os.environ["MASPO_NA"] = str(args.na)
     os.environ["MASPO_FIXED_DEPTH"] = str(args.depth)
@@ -79,7 +97,7 @@ async def main():
         f"model_profile={os.environ.get('FORMAL_MODEL_PROFILE', 'default')} "
         f"opt={len(opt_items)} eval_pool={len(eval_pool)} eval_run={len(eval_run_items)} "
         f"bank_size={args.bank_size} top_k={args.top_k} "
-        f"skip_optimize={args.skip_optimize}",
+        f"skip_optimize={args.skip_optimize} no_bank={args.no_bank}",
         flush=True,
     )
 
@@ -173,36 +191,45 @@ async def main():
             encoding="utf-8",
         )
 
-    if bank_path.exists():
-        bank_path.unlink()
-    build_bank = ExperienceMemoryBank(str(bank_path), top_k=args.top_k)
-    build_file = f"result/{tag}_stage1_opt_memory_build.json"
-    await arun_test_suite(
-        opt_items,
-        task_type=task_type,
-        graph_types=[graph_type],
-        sample_size=None,
-        seed=args.seed,
-        split_info={"stage": "memory_build_from_opt_split", "seed": args.seed, "opt_size": args.opt_size, "source": "opt/train only", "no_eval_leakage": True},
-        output_file=build_file,
-        max_concurrent=args.max_concurrent,
-        prompt_map=prompt_map,
-        handoff_map=handoff_map,
-        use_handoff=True,
-        use_judge=use_judge,
-        nr=args.nr,
-        use_disagreement_handoff=True,
-        use_residual_selector=True,
-        experience_bank=build_bank,
-        experience_top_k=args.top_k,
-        write_experience=True,
-    )
-    kept = finalize_experience_bank(bank_path, args.bank_size)
-    verify_bank_from_opt_only(str(bank_path), opt_ids)
-    print(f"[FORMAL EGMAP] built bank entries={kept} -> {bank_path}", flush=True)
+    if args.no_bank and not args.skip_optimize:
+        print("[FORMAL EGMAP] --no-bank requires --skip-optimize (reuse frozen prompts)", flush=True)
+        raise SystemExit(2)
 
-    eval_bank = ExperienceMemoryBank(str(bank_path), top_k=args.top_k)
-    eval_file = f"result/{tag}.json"
+    if not args.no_bank:
+        if bank_path.exists():
+            bank_path.unlink()
+        build_bank = ExperienceMemoryBank(str(bank_path), top_k=args.top_k)
+        build_file = f"result/{tag}_stage1_opt_memory_build.json"
+        await arun_test_suite(
+            opt_items,
+            task_type=task_type,
+            graph_types=[graph_type],
+            sample_size=None,
+            seed=args.seed,
+            split_info={"stage": "memory_build_from_opt_split", "seed": args.seed, "opt_size": args.opt_size, "source": "opt/train only", "no_eval_leakage": True},
+            output_file=build_file,
+            max_concurrent=args.max_concurrent,
+            prompt_map=prompt_map,
+            handoff_map=handoff_map,
+            use_handoff=True,
+            use_judge=use_judge,
+            nr=args.nr,
+            use_disagreement_handoff=True,
+            use_residual_selector=True,
+            experience_bank=build_bank,
+            experience_top_k=args.top_k,
+            write_experience=True,
+        )
+        kept = finalize_experience_bank(bank_path, args.bank_size)
+        verify_bank_from_opt_only(str(bank_path), opt_ids)
+        print(f"[FORMAL EGMAP] built bank entries={kept} -> {bank_path}", flush=True)
+        eval_bank = ExperienceMemoryBank(str(bank_path), top_k=args.top_k)
+    else:
+        print("[FORMAL EGMAP] no-bank ablation: skipping memory build, eval without retrieval", flush=True)
+        eval_bank = None
+
+    eval_suffix = "_nobank" if args.no_bank else ""
+    eval_file = f"result/{tag}{eval_suffix}.json"
     await arun_test_suite(
         eval_run_items,
         task_type=task_type,
@@ -210,17 +237,18 @@ async def main():
         sample_size=None,
         seed=args.seed,
         split_info={
-            "stage": "frozen_bank_eval",
+            "stage": "frozen_bank_eval" if not args.no_bank else "frozen_eval_no_bank",
             "seed": args.seed,
             "opt_size": args.opt_size,
             "eval_pool_size": len(eval_pool),
             "eval_run_size": len(eval_run_items),
             "split_manifest": str(split_manifest_path),
-            "bank": str(bank_path),
-            "bank_size_cap": args.bank_size,
-            "top_k": args.top_k,
+            "bank": str(bank_path) if not args.no_bank else None,
+            "bank_size_cap": args.bank_size if not args.no_bank else 0,
+            "top_k": args.top_k if not args.no_bank else 0,
             "write_experience": False,
             "no_eval_leakage": True,
+            "experience_ablation_no_bank": args.no_bank,
         },
         output_file=eval_file,
         max_concurrent=args.max_concurrent,
@@ -232,7 +260,7 @@ async def main():
         use_disagreement_handoff=True,
         use_residual_selector=True,
         experience_bank=eval_bank,
-        experience_top_k=args.top_k,
+        experience_top_k=args.top_k if eval_bank else 0,
         write_experience=False,
     )
     print(f"[FORMAL EGMAP] saved eval -> {eval_file}", flush=True)

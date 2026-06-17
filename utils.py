@@ -299,6 +299,7 @@ def normalize_answer(answer: str) -> str:
     answer = re.sub(r'\\frac\{([^}]+)\}\{([^}]+)\}', r'\1/\2', answer)
     answer = re.sub(r'\\dfrac\{([^}]+)\}\{([^}]+)\}', r'\1/\2', answer)
     answer = re.sub(r'\\pi', 'π', answer)
+    answer = re.sub(r'(?<![a-z])pi(?![a-z])', 'π', answer, flags=re.I)
     answer = re.sub(r'\\left|\\right', '', answer)
     answer = answer.replace('[', '(').replace(']', ')')
     if re.fullmatch(r'[,\s\-0-9]+', answer):
@@ -357,6 +358,12 @@ def math_equivalent(model_output: str, correct_answer: str) -> bool:
         return False
     if a == b:
         return True
+    # (15,-29) vs 15/-29 style coordinate pairs
+    slash_m = re.fullmatch(r"(-?\d+)/(-?\d+)", a)
+    if slash_m:
+        a_slash = f"({slash_m.group(1)},{slash_m.group(2)})"
+        if normalize_answer(a_slash) == normalize_answer(b):
+            return True
     a_parts = [p for p in re.split(r"[,;]+", a) if p]
     b_parts = [p for p in re.split(r"[,;]+", b) if p]
     if len(a_parts) != len(b_parts):

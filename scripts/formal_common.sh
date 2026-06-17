@@ -9,6 +9,16 @@ formal_is_vqa_dataset() {
   esac
 }
 
+# Text-first campaign: skip VQA until multimodal vLLM is up (RUN_VQA=1).
+formal_skip_vqa_unless_enabled() {
+  local dataset="${1:-}"
+  if formal_is_vqa_dataset "${dataset}" && [[ "${RUN_VQA:-0}" != "1" ]]; then
+    echo "[skip] VQA ${dataset} — text-first; deploy multimodal vLLM then RUN_VQA=1"
+    return 0
+  fi
+  return 1
+}
+
 formal_set_vqa_mode() {
   local dataset="${1:-}"
   if formal_is_vqa_dataset "${dataset}"; then

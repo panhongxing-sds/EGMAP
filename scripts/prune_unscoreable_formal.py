@@ -62,6 +62,36 @@ def formal_pair_key(path: Path) -> Optional[Tuple[str, str, str]]:
     return m.group("ds"), m.group("seed"), m.group("graph")
 
 
+def _has_closed_answer_tag(raw: str) -> bool:
+    return bool(re.search(r"<answer>.*?</answer>", raw or "", re.I | re.S))
+
+
+def _truncation_reasons(output: str, raw_output: str, task_type: TaskType) -> List[str]:
+    """Detect model outputs cut off before a scoreable final answer."""
+    reasons: List[str] = []
+    raw = (raw_output or "").strip()
+    out = (output or "").strip()
+    if task_type != TaskType.MATH or not raw:
+        return reasons
+    has_open = bool(re.search(r"<answer>", raw, re.I))
+    has_close = bool(re.search(r"</answer>", raw, re.I))
+    if has_open and not has_close:
+        reasons.append("truncated_answer_tag")
+    if _has_closed_answer_tag(raw):
+        return reasons
+    if not out:
+        return reasons
+    if out.endswith(("\\", "=", "+", "-", "*", "/")):
+        reasons.append("truncated_tail")
+    if re.search(r"\\(?:sum|frac|epsilon|infty)\b", out) and (
+        "\\sum" in out or out.count("(") > out.count(")")
+    ):
+        reasons.append("truncated_mid_formula")
+    if out.count("{") > out.count("}"):
+        reasons.append("unclosed_brace")
+    return reasons
+
+
 def unscoreable_reasons(
     output: str,
     *,
@@ -69,6 +99,7 @@ def unscoreable_reasons(
     task_type: TaskType,
     error: Optional[str] = None,
     correct: Optional[bool] = None,
+    raw_output: str = "",
 ) -> List[str]:
     reasons: List[str] = []
     if error:
@@ -94,9 +125,14 @@ def unscoreable_reasons(
         return reasons
 
     if task_type == TaskType.MATH:
+        reasons.extend(_truncation_reasons(out, raw_output, task_type))
         if "\\end{answer}" in out:
             reasons.append("malformed_answer_markup")
-        if out.count("(") > out.count(")"):
+        if (
+            out.count("(") > out.count(")")
+            and not _has_closed_answer_tag(raw_output)
+            and not re.match(r"^\([^)]*,\s*[^\]]*\]$", out)
+        ):
             reasons.append("unbalanced_parens")
         if _COMPRESS_GARBAGE_RE.search(out):
             reasons.append("compress_garbage")
@@ -121,6 +157,7 @@ def item_reasons(item: Dict, dataset: str, task_type: TaskType) -> List[str]:
         task_type=task_type,
         error=model.get("error"),
         correct=model.get("correct"),
+        raw_output=model.get("raw_output") or "",
     )
 
 

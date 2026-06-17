@@ -35,6 +35,18 @@ from prompts import OPTIMIZATION_REQUIREMENTS
 from run_maspo import arun_test_suite
 from formal_tags import model_tag_suffix, strip_model_suffix, with_model_suffix
 
+_VQA_DATASETS = frozenset({"vqarad", "slake", "chartqa", "textvqa", "pmcvqa"})
+
+
+def _maybe_skip_vqa(dataset: str) -> None:
+    if dataset in _VQA_DATASETS and os.environ.get("RUN_VQA", "0") != "1":
+        print(
+            f"[SKIP] VQA dataset={dataset} — text-first mode; "
+            "deploy multimodal vLLM then RUN_VQA=1",
+            flush=True,
+        )
+        raise SystemExit(0)
+
 
 def _tag(dataset: str, graph: str, na: int, depth: int, sample: int, opt: int, seed: int) -> str:
     base = f"maspo_formal_{dataset}_{graph}_na{na}_d{depth}s{sample}o{opt}seed{seed}"
@@ -65,6 +77,7 @@ async def main():
     parser.add_argument("--top-k", type=int, default=3, help="For EGMAP split manifest lookup")
     parser.add_argument("--skip-optimize", action="store_true")
     args = parser.parse_args()
+    _maybe_skip_vqa(args.dataset)
 
     os.environ["MASPO_NA"] = str(args.na)
     os.environ["MASPO_FIXED_DEPTH"] = str(args.depth)
@@ -150,7 +163,39 @@ async def main():
         manifest = json.loads(split_manifest_path.read_text(encoding="utf-8"))
         run_ids = manifest.get("eval_unique_ids_run") or []
         by_id = {item["unique_id"]: item for item in eval_pool}
+        missing = [uid for uid in run_ids if uid not in by_id]
+        if missing:
+            raise ValueError(
+                f"Split manifest lists {len(missing)} eval id(s) not in eval_pool "
+                f"(seed={args.seed}, dataset={dataset}): {missing[:5]}"
+            )
         eval_run_items = [by_id[uid] for uid in run_ids]
+        if len(eval_run_items) != len(run_ids):
+            raise ValueError(
+                f"Eval manifest size mismatch: manifest={len(run_ids)} resolved={len(eval_run_items)}"
+            )
+        print(
+            f"[OFFICIAL MASPO] eval from manifest: {len(eval_run_items)} items -> {split_manifest_path}",
+            flush=True,
+        )
+    elif args.sample_size:
+        opt_ids = {item["unique_id"] for item in opt_items}
+        save_formal_split_manifest(
+            str(split_manifest_path),
+            {
+                "tag": egmap_tag,
+                "dataset": dataset,
+                "graph": graph_type.value,
+                "seed": args.seed,
+                "opt_size": args.opt_size,
+                "sample_size": args.sample_size,
+                "opt_unique_ids": sorted(opt_ids),
+                "eval_pool_size": len(eval_pool),
+                "eval_unique_ids_run": [item["unique_id"] for item in eval_run_items],
+                "no_eval_leakage": True,
+            },
+        )
+        print(f"[OFFICIAL MASPO] wrote split manifest -> {split_manifest_path}", flush=True)
 
     eval_file = f"result/{tag}.json"
     await arun_test_suite(

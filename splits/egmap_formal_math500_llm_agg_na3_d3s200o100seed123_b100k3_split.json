@@ -1,5 +1,5 @@
 {
-  "tag": "egmap_formal_math500_llm_agg_na3_d3s200o100seed123_b100k3",
+  "tag": "egmap_formal_math500_llm_agg_na3_d3s200o100seed123_b100k3_m4b",
   "dataset": "math500",
   "graph": "llm_agg",
   "seed": 123,
@@ -150,6 +150,7 @@
     "test/algebra/1214.json",
     "test/number_theory/691.json",
     "test/number_theory/820.json",
+    "test/precalculus/695.json",
     "test/prealgebra/1003.json",
     "test/prealgebra/465.json",
     "test/prealgebra/1840.json",
@@ -210,6 +211,7 @@
     "test/counting_and_probability/116.json",
     "test/algebra/1553.json",
     "test/algebra/2593.json",
+    "test/geometry/183.json",
     "test/number_theory/239.json",
     "test/intermediate_algebra/960.json",
     "test/number_theory/72.json",
@@ -266,6 +268,7 @@
     "test/intermediate_algebra/1566.json",
     "test/precalculus/499.json",
     "test/counting_and_probability/389.json",
+    "test/intermediate_algebra/1210.json",
     "test/intermediate_algebra/754.json",
     "test/intermediate_algebra/662.json",
     "test/intermediate_algebra/1791.json",
@@ -297,22 +300,16 @@
     "test/precalculus/819.json",
     "test/algebra/1282.json",
     "test/counting_and_probability/1014.json",
+    "test/precalculus/1300.json",
     "test/prealgebra/1807.json",
     "test/prealgebra/1458.json",
     "test/geometry/1097.json",
+    "test/intermediate_algebra/1197.json",
     "test/prealgebra/572.json",
     "test/precalculus/697.json",
     "test/geometry/465.json",
     "test/counting_and_probability/25149.json"
   ],
-  "bank_path": "memory/egmap_formal_math500_llm_agg_na3_d3s200o100seed123_b100k3_bank.jsonl",
-  "no_eval_leakage": true,
-  "excluded_unscoreable": [
-    "test/geometry/183.json",
-    "test/intermediate_algebra/1197.json",
-    "test/intermediate_algebra/1210.json",
-    "test/precalculus/1300.json",
-    "test/precalculus/695.json"
-  ],
-  "eval_run_size": 195
+  "bank_path": "memory/egmap_formal_math500_llm_agg_na3_d3s200o100seed123_b100k3_m4b_bank.jsonl",
+  "no_eval_leakage": true
 }

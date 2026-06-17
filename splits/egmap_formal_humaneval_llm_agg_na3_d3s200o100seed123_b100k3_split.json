@@ -1,5 +1,5 @@
 {
-  "tag": "egmap_formal_humaneval_llm_agg_na3_d3s200o100seed123_b100k3",
+  "tag": "egmap_formal_humaneval_llm_agg_na3_d3s200o100seed123_b100k3_m4b",
   "dataset": "humaneval",
   "graph": "llm_agg",
   "seed": 123,
@@ -110,6 +110,7 @@
   "eval_pool_size": 64,
   "eval_unique_ids_run": [
     "HumanEval/3",
+    "HumanEval/6",
     "HumanEval/8",
     "HumanEval/12",
     "HumanEval/14",
@@ -121,6 +122,7 @@
     "HumanEval/25",
     "HumanEval/28",
     "HumanEval/30",
+    "HumanEval/31",
     "HumanEval/35",
     "HumanEval/37",
     "HumanEval/38",
@@ -140,6 +142,7 @@
     "HumanEval/83",
     "HumanEval/88",
     "HumanEval/89",
+    "HumanEval/91",
     "HumanEval/92",
     "HumanEval/93",
     "HumanEval/94",
@@ -171,12 +174,6 @@
     "HumanEval/155",
     "HumanEval/158"
   ],
-  "bank_path": "memory/egmap_formal_humaneval_llm_agg_na3_d3s200o100seed123_b100k3_bank.jsonl",
-  "no_eval_leakage": true,
-  "excluded_unscoreable": [
-    "HumanEval/31",
-    "HumanEval/6",
-    "HumanEval/91"
-  ],
-  "eval_run_size": 61
+  "bank_path": "memory/egmap_formal_humaneval_llm_agg_na3_d3s200o100seed123_b100k3_m4b_bank.jsonl",
+  "no_eval_leakage": true
 }

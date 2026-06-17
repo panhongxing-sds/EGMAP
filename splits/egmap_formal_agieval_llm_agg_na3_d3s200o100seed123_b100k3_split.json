@@ -1,5 +1,5 @@
 {
-  "tag": "egmap_formal_agieval_llm_agg_na3_d3s200o100seed123_b100k3",
+  "tag": "egmap_formal_agieval_llm_agg_na3_d3s200o100seed123_b100k3_m4b",
   "dataset": "agieval",
   "graph": "llm_agg",
   "seed": 123,
@@ -153,6 +153,7 @@
     "69",
     "70",
     "71",
+    "72",
     "73",
     "75",
     "76",
@@ -162,6 +163,7 @@
     "82",
     "83",
     "84",
+    "88",
     "89",
     "90",
     "91",
@@ -197,6 +199,7 @@
     "145",
     "147",
     "148",
+    "149",
     "151",
     "153",
     "154",
@@ -216,6 +219,7 @@
     "176",
     "177",
     "178",
+    "180",
     "182",
     "183",
     "184",
@@ -230,6 +234,7 @@
     "197",
     "200",
     "201",
+    "203",
     "204",
     "206",
     "208",
@@ -237,7 +242,9 @@
     "210",
     "211",
     "212",
+    "213",
     "215",
+    "216",
     "217",
     "219",
     "221",
@@ -259,16 +266,6 @@
     "250",
     "251"
   ],
-  "bank_path": "memory/egmap_formal_agieval_llm_agg_na3_d3s200o100seed123_b100k3_bank.jsonl",
-  "no_eval_leakage": true,
-  "excluded_unscoreable": [
-    "149",
-    "180",
-    "203",
-    "213",
-    "216",
-    "72",
-    "88"
-  ],
-  "eval_run_size": 149
+  "bank_path": "memory/egmap_formal_agieval_llm_agg_na3_d3s200o100seed123_b100k3_m4b_bank.jsonl",
+  "no_eval_leakage": true
 }
